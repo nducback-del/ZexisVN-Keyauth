@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Chatbot CẢNH BÁO NGUY CƠ ONLINE — Anti-Scam & Safety</title>
+<style>
+/* UI (kept same as your style) */
+*{box-sizing:border-box;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial}
+:root{
+  --bg:#0b0b0c;
+  --panel:#0f1113;
+  --muted:#9aa3ad;
+  --accent:#00e6ff;
+  --accent-2:#00b3ff;
+  --danger:#ff6b6b;
+  --danger-2:#ff3b3b;
+}
+html,body{height:100%;margin:0;background:linear-gradient(180deg,#060708 0%, #050506 100%);color:#e6eef3}
+.app{height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.shell{width:100%;max-width:980px;height:86vh;background:var(--panel);border-radius:12px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 6px 30px rgba(0,0,0,0.6)}
+.header{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid rgba(255,255,255,0.03)}
+.logo{display:flex;gap:12px;align-items:center}
+.logo .dot{width:36px;height:36px;border-radius:8px;background:linear-gradient(135deg,var(--accent),var(--accent-2));display:flex;align-items:center;justify-content:center;color:#001;font-weight:700}
+.title{font-weight:600}
+.controls{display:flex;gap:10px;align-items:center;color:var(--muted)}
+.body{display:flex;flex:1;overflow:hidden}
+.sidebar{width:260px;border-right:1px solid rgba(255,255,255,0.03);padding:12px 14px;background:linear-gradient(180deg, rgba(0,0,0,0.02), transparent)}
+.sidebar h3{margin:8px 0;color:var(--accent)}
+.sidebar p{font-size:13px;color:var(--muted);line-height:1.4}
+.main{flex:1;display:flex;flex-direction:column}
+.chat{flex:1;overflow:auto;padding:18px;display:flex;flex-direction:column;gap:12px;background:linear-gradient(180deg,rgba(0,0,0,0.02),transparent)}
+.msg{max-width:72%;padding:12px 14px;border-radius:12px;line-height:1.45;word-break:break-word}
+.msg.user{align-self:flex-end;background:linear-gradient(90deg,var(--accent),var(--accent-2));color:#001;border-bottom-right-radius:4px}
+.msg.bot{align-self:flex-start;background:#0b0d0f;border:1px solid rgba(0,230,255,0.06);color:#dff8ff}
+.typing{display:inline-flex;gap:6px;align-items:center}
+.typing span{width:7px;height:7px;background:var(--muted);border-radius:50%;display:inline-block;animation:blink 1s infinite}
+.typing span:nth-child(2){animation-delay:0.15s}
+.typing span:nth-child(3){animation-delay:0.3s}
+@keyframes blink{50%{opacity:0.2;transform:translateY(-4px)}}
+.footer{padding:12px 18px;border-top:1px solid rgba(255,255,255,0.03);display:flex;flex-direction:column;gap:10px;background:linear-gradient(180deg,transparent, rgba(255,255,255,0.02))}
+.inputRow{display:flex;gap:10px;align-items:center}
+.input{flex:1;display:flex;align-items:center;background:#0b0d0f;border-radius:10px;padding:8px;border:1px solid rgba(255,255,255,0.02)}
+.input input{flex:1;border:0;background:transparent;color:#e8f9ff;padding:8px;font-size:15px;outline:none}
+.sendBtn{background:linear-gradient(90deg,var(--accent),var(--accent-2));border:none;padding:10px 14px;border-radius:10px;color:#002;font-weight:700;cursor:pointer}
+.small{font-size:13px;color:var(--muted)}
+.footer-row{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.centerNote{display:flex;gap:10px;align-items:center;color:var(--muted);font-size:13px}
+#startupOverlay{position:fixed;inset:0;background:linear-gradient(180deg,#00151a,#000);display:flex;align-items:center;justify-content:center;z-index:10000}
+.startPanel{width:460px;background:linear-gradient(180deg,#071319,#051013);border-radius:12px;padding:26px;border:1px solid rgba(0,255,255,0.06);box-shadow:0 8px 40px rgba(0,0,0,0.6);text-align:center}
+.startPanel h2{color:var(--accent);margin-bottom:12px}
+.startBtn{background:var(--accent);border:0;color:#002;padding:10px 18px;border-radius:8px;font-weight:700;cursor:pointer}
+.loadWrap{margin-top:18px;display:none;flex-direction:column;align-items:center}
+.bar{width:100%;height:10px;background:#0b0d0f;border-radius:8px;overflow:hidden;margin-top:8px}
+.barInner{height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width .12s linear}
+.percent{margin-top:8px;color:var(--muted)}
+
+/* emergency popup */
+#emergPopup{position:fixed;left:50%;top:12%;transform:translateX(-50%);width:88%;max-width:520px;background:linear-gradient(180deg,var(--danger),var(--danger-2));color:#fff;padding:16px;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,0.6);z-index:20000;display:none;border:2px solid rgba(255,255,255,0.08)}
+#emergPopup h3{margin:0 0 8px;font-size:18px}
+#emergPopup p{margin:0 0 12px;font-size:14px}
+#emergPopup .ep-actions{display:flex;gap:8px;justify-content:flex-end}
+.ep-btn{background:rgba(0,0,0,0.12);color:#fff;border:0;padding:8px 12px;border-radius:8px;cursor:pointer;font-weight:700}
+.ep-btn.call{background:#fff;color:#b30000}
+
+/* small screens */
+@media (max-width:880px){.shell{max-width:100%;height:100vh;border-radius:0}.sidebar{display:none}}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="shell" role="application" aria-label="Chatbot Cảnh Báo">
+    <div class="header">
+      <div class="logo"><div class="dot">AI</div><div class="title">Chatbot CẢNH BÁO NGUY CƠ ONLINE</div></div>
+      <div class="controls small">Demo • Offline • Dark</div>
+    </div>
+
+    <div class="body">
+      <aside class="sidebar">
+        <h3>Về Chatbot</h3>
+        <p>Hỗ trợ nhận diện lừa đảo, phản ứng an toàn, xử lý tình huống nguy hiểm và hướng dẫn báo cáo.</p>
+        <h3>Liên hệ khẩn</h3>
+        <p class="small">Số khẩn cấp (VD Việt Nam):<br>113 — Công an / 114 — Cứu hoả / 115 — Cấp cứu</p>
+      </aside>
+
+      <main class="main" id="mainArea">
+        <section class="chat" id="chatArea" aria-live="polite"></section>
+
+        <div class="footer">
+          <div class="inputRow">
+            <div class="input" role="search">
+              <input id="userInput" placeholder="Nhập tình huống nguy hiểm hoặc câu hỏi về lừa đảo, trộm, bắt cóc, tai nạn..." aria-label="Nhập câu hỏi" />
+            </div>
+            <button class="sendBtn" id="sendBtn" title="Gửi">GỬI</button>
+          </div>
+
+          <div class="footer-row">
+            <div class="centerNote small">Dành cho học sinh THCS — Nếu nguy hiểm thực sự, gọi ngay số khẩn cấp địa phương <Được phát triển bởi Mduc>.</div>
+            <div>
+              <button id="contactBtn" class="small" style="background:transparent;border:1px solid rgba(255,255,255,0.04);padding:6px 10px;border-radius:8px;color:var(--accent)">Liên hệ</button>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+</div>
+
+<!-- startup overlay -->
+<div id="startupOverlay" role="dialog" aria-modal="true">
+  <div class="startPanel" role="document">
+    <h2>Chào mừng đến với Chatbot CẢNH BÁO NGUY CƠ ONLINE</h2>
+    <p class="small">Hỗ trợ nhận diện lừa đảo & hướng dẫn phản ứng an toàn</p>
+    <div style="margin-top:14px">
+      <button id="startButton" class="startBtn">Khởi động</button>
+    </div>
+    <div class="loadWrap" id="loadWrap">
+      <div class="bar"><div class="barInner" id="barInner"></div></div>
+      <div class="percent" id="percentText">0%</div>
+    </div>
+  </div>
+</div>
+
+<!-- emergency popup -->
+<div id="emergPopup" role="alert" aria-live="assertive">
+  <h3 id="epTitle">CẢNH BÁO KHẨN CẤP</h3>
+  <p id="epMsg">Phát hiện tình huống nghiêm trọng.</p>
+  <div class="ep-actions">
+    <button class="ep-btn" id="epClose">Đóng</button>
+    <button class="ep-btn call" id="epCall">Gọi 113</button>
+  </div>
+</div>
+
+<script>
+/* ====== Config & data ====== */
+const chatArea = document.getElementById('chatArea');
+const inputEl = document.getElementById('userInput');
+const sendBtn = document.getElementById('sendBtn');
+const contactBtn = document.getElementById('contactBtn');
+const startButton = document.getElementById('startButton');
+const loadWrap = document.getElementById('loadWrap');
+const barInner = document.getElementById('barInner');
+const percentText = document.getElementById('percentText');
+const startupOverlay = document.getElementById('startupOverlay');
+const emergPopup = document.getElementById('emergPopup');
+const epTitle = document.getElementById('epTitle');
+const epMsg = document.getElementById('epMsg');
+const epClose = document.getElementById('epClose');
+const epCall = document.getElementById('epCall');
+
+const CHAT_KEY = 'chatbot_anti_scam_history_final_v1';
+
+/* Forbidden / Emergency keywords */
+const forbiddenKeywords = ["hack","hacking","ddos","malware","virus","exploit","cheat","crack","keygen"];
+const emergencyKeywords = {
+  scam: ["lừa đảo","phishing","scam","email giả mạo","web giả mạo","tin nhắn lừa","trúng thưởng"],
+  theft: ["trộm","cướp","đột nhập","bị trộm","ăn trộm","trộm đột nhập"],
+  kidnap: ["bắt cóc","bị bắt cóc","theo dõi","bị theo dõi","bắt cóc trẻ em","bị kéo đi"],
+  threat: ["đe dọa","đe dọa tính mạng","tin nhắn đe dọa","bị dọa"],
+  accident: ["tai nạn","cấp cứu","bị thương","ngã","chấn thương","tai nạn giao thông"]
+};
+
+/* Knowledge snippets (for richer replies) */
+const knowledge = {
+  scam: `⚠️ LỪA ĐẢO — Dấu hiệu & cách xử lý:
+- Dấu hiệu: Yêu cầu OTP, chuyển tiền, link giả, domain viết sai.
+- Làm ngay: KHÔNG bấm link, KHÔNG cung cấp OTP/password, lưu chứng cứ (ảnh, link), báo phụ huynh/ quản trị nền tảng.`,
+  theft: `🚨 TRỘM / CƯỚP — Hành động khẩn:
+1) Giữ an toàn: rời khỏi nơi nguy hiểm, tránh đối mặt trực tiếp.
+2) Gọi công an (113 ở VN).
+3) Nếu an toàn: ghi nhớ, chụp ảnh/video, mô tả kẻ trộm, biển số xe.`,
+  kidnap: `🚨 NGUY CƠ BẮT CÓC — Hướng dẫn:
+1) Nhanh chóng đến nơi đông người, tránh đi một mình.
+2) Gọi số khẩn cấp: 113 (VN) hoặc số địa phương.
+3) Ghi nhận mọi chi tiết: biển số, mô tả, hướng đi. Báo cha mẹ/giáo viên.`,
+  threat: `⚠️ BỊ ĐE DỌA — Lưu ý:
+- Không trả lời kẻ đe dọa.
+- Giữ nguyên chứng cứ: chụp màn hình, xuất file.
+- Liên hệ công an nếu bị đe dọa nghiêm trọng; báo người lớn/nhà trường.`,
+  accident: `🚑 TAI NẠN / CẤP CỨU — Nhanh chóng:
+1) Gọi 115 (VN) hoặc số cấp cứu tại địa phương.
+2) Nếu biết sơ cứu: cầm máu, đặt nạn nhân ở tư thế an toàn; không dịch chuyển nạn nhân nếu nghi gãy xương nặng.
+3) Mô tả vị trí & tình trạng chính xác cho nhân viên y tế.`
+};
+
+/* ====== Startup behavior ====== */
+startButton.onclick = () => {
+  startButton.style.display = 'none';
+  loadWrap.style.display = 'flex';
+  let p = 0;
+  const t = setInterval(()=>{
+    p += Math.floor(Math.random()*8)+4;
+    if(p>100) p=100;
+    barInner.style.width = p + '%';
+    percentText.textContent = p + '%';
+    if(p>=100){
+      clearInterval(t);
+      setTimeout(()=>{
+        startupOverlay.style.display = 'none';
+        appendBot('Xin chào 👋 — tôi là Chatbot CẢNH BÁO NGUY CƠ ONLINE. Nếu tình huống khẩn cấp, gọi ngay số khẩn cấp địa phương.');
+      }, 350);
+    }
+  }, 80);
+};
+
+/* ====== UI helpers ====== */
+function appendUser(text){
+  const d = document.createElement('div');
+  d.className = 'msg user';
+  d.textContent = text;
+  chatArea.appendChild(d);
+  chatArea.scrollTop = chatArea.scrollHeight;
+}
+function appendBot(text){
+  const d = document.createElement('div');
+  d.className = 'msg bot';
+  // preserve line breaks
+  text.split('\n').forEach((line, i) => {
+    d.appendChild(document.createTextNode(line));
+    if(i < text.split('\n').length -1) d.appendChild(document.createElement('br'));
+  });
+  chatArea.appendChild(d);
+  chatArea.scrollTop = chatArea.scrollHeight;
+}
+function showTyping(){
+  const el = document.createElement('div');
+  el.className = 'msg bot';
+  const c = document.createElement('div');
+  c.className = 'typing';
+  c.innerHTML = '<span></span><span></span><span></span>';
+  el.appendChild(c);
+  chatArea.appendChild(el);
+  chatArea.scrollTop = chatArea.scrollHeight;
+  return el;
+}
+
+/* ====== Emergency popup (visible + call action) ====== */
+function showEmergencyPopup(title, message, suggestedNumber = '113'){
+  epTitle.textContent = title || 'CẢNH BÁO KHẨN CẤP';
+  epMsg.textContent = message;
+  epCall.textContent = `Gọi ${suggestedNumber}`;
+  emergPopup.style.display = 'block';
+  // focus for accessibility
+  epClose.focus();
+}
+function hideEmergencyPopup(){ emergPopup.style.display = 'none'; }
+
+/* ep actions */
+epClose.addEventListener('click', ()=> hideEmergencyPopup());
+epCall.addEventListener('click', ()=> {
+  // attempt to call via tel: (works on mobile). On desktop opens default handler.
+  const num = epCall.textContent.replace(/\D/g,'') || '113';
+  window.open('tel:' + num, '_self');
+});
+
+/* ====== Core message processing ====== */
+function isContainingAny(text, arr){
+  const low = text.toLowerCase();
+  return arr.some(k => low.includes(k));
+}
+
+function detectSeverity(text){
+  // returns severity and category
+  const low = text.toLowerCase();
+  if(isContainingAny(low, emergencyKeywords.kidnap)) return {level: 3, cat: 'kidnap'}; // highest
+  if(isContainingAny(low, emergencyKeywords.theft)) return {level: 3, cat: 'theft'};
+  if(isContainingAny(low, emergencyKeywords.accident)) return {level: 3, cat: 'accident'};
+  if(isContainingAny(low, emergencyKeywords.threat)) return {level: 3, cat: 'threat'};
+  if(isContainingAny(low, emergencyKeywords.scam)) return {level: 2, cat: 'scam'};
+  return {level: 0, cat: null};
+}
+
+function handleUserMessage(rawText){
+  const text = (rawText || '').trim();
+  if(!text) return;
+  appendUser(text);
+  inputEl.value = '';
+
+  // show typing indicator
+  const typingEl = showTyping();
+
+  setTimeout(()=> {
+    typingEl.remove();
+
+    const low = text.toLowerCase();
+
+    // forbidden
+    if(isContainingAny(low, forbiddenKeywords)){
+      appendBot('Xin lỗi — tôi không thể hỗ trợ yêu cầu liên quan đến hack/cheat/malware. Nếu bạn muốn học an toàn hợp pháp, tôi có thể gợi ý tài liệu bảo mật và tài nguyên ethical hacking.');
+      saveChatToStorage();
+      return;
+    }
+
+    // severity detection
+    const det = detectSeverity(text);
+
+    // immediate rules: url/otp/phone detection
+    const urlRegex = /(https?:\/\/[^\s]+)/i;
+    const otpRegex = /\b(otp|mã\s?xác|minh|mã\s?xác\s?thực|mã\s?xác\s?nhận|mã\s?otp)\b/i;
+    const phoneRegex = /(\+?\d{8,15})/;
+    if(urlRegex.test(text)){
+      appendBot('⚠️ Link khả nghi phát hiện: KHÔNG bấm vào link. Lưu lại bằng chứng (ảnh, URL). Nếu đã bấm, đổi mật khẩu, bật 2FA và báo người lớn.');
+      saveChatToStorage();
+      return;
+    }
+    if(otpRegex.test(text)){
+      appendBot('⚠️ Mã OTP/ mã xác thực được nhắc tới — tuyệt đối KHÔNG chia sẻ mã này với bất kỳ ai.');
+      saveChatToStorage();
+      return;
+    }
+    if(phoneRegex.test(text) && /yêu cầu|chuyển|đòi|đe dọa|gọi|liên hệ/.test(low)){
+      appendBot('⚠️ Số điện thoại lạ yêu cầu chuyển tiền/đe dọa — chụp lại, chặn số và báo cho cơ quan chức năng.');
+      saveChatToStorage();
+      return;
+    }
+
+    // handle detected emergencies by category with step-by-step guidance
+    if(det.level > 0){
+      switch(det.cat){
+        case 'theft':
+          appendBot(knowledge.theft);
+          // show emergency popup with call suggestion
+          showEmergencyPopup('CẢNH BÁO TRỘM/CƯỚP', 'Phát hiện từ khóa liên quan đến trộm/cướp. Nếu bạn đang trong tình huống NGAY BÂY GIỜ — gọi 113 hoặc số khẩn cấp địa phương ngay lập tức.', '113');
+          break;
+        case 'kidnap':
+          appendBot(knowledge.kidnap);
+          showEmergencyPopup('CẢNH BÁO BẮT CÓC', 'Phát hiện từ khóa liên quan đến bắt cóc/theo dõi. Nếu có nguy cơ ngay bây giờ — hãy tìm nơi đông người và gọi 113 ngay.', '113');
+          break;
+        case 'threat':
+          appendBot(knowledge.threat);
+          showEmergencyPopup('CẢNH BÁO ĐE DỌA', 'Phát hiện từ khóa liên quan đến đe dọa. Lưu chứng cứ và gọi công an nếu tính mạng bị đe dọa.', '113');
+          break;
+        case 'accident':
+          appendBot(knowledge.accident);
+          showEmergencyPopup('CẢNH BÁO CẤP CỨU', 'Phát hiện từ khóa tai nạn/cấp cứu. Nếu có người bị thương nặng — gọi 115 ngay.', '115');
+          break;
+        case 'scam':
+          appendBot(knowledge.scam);
+          break;
+        default:
+          appendBot('Phát hiện dấu hiệu nguy cơ. Hãy giữ an toàn và liên hệ cơ quan chức năng nếu cần.');
+      }
+      saveChatToStorage();
+      return;
+    }
+
+    // If none matched, attempt to provide helpful structured guidance based on keywords
+    // Very simple intent heuristics for richer responses:
+    if(/mất tài khoản|bị mất tài khoản|khôi phục tài khoản|bị hack tài khoản/.test(low)){
+      appendBot(`🔐 Khôi phục tài khoản — các bước:
+1) Nếu còn truy cập: đổi mật khẩu ngay và bật 2FA.
+2) Kiểm tra email/số điện thoại liên kết.
+3) Liên hệ hỗ trợ nền tảng, gửi bằng chứng (ảnh, thời gian, thiết bị).`);
+      saveChatToStorage();
+      return;
+    }
+
+    if(/tin nhắn giả mạo|sms giả mạo|zalo giả mạo|facebook giả mạo/.test(low)){
+      appendBot(`📵 Tin nhắn/mạng xã hội giả mạo:
+- Không trả lời, chặn và lưu chứng cứ.
+- Nếu yêu cầu tiền/OTP: KHÔNG làm theo, báo cho người lớn và nền tảng.`);
+      saveChatToStorage();
+      return;
+    }
+
+    // fallback general help
+    appendBot(`Mình chưa chắc chắn về tình huống cụ thể. Nếu là KHẨN CẤP — gọi số khẩn cấp địa phương. Bạn muốn hướng dẫn các bước an toàn chung (có/không)?`);
+    saveChatToStorage();
+  }, 600 + Math.random()*700);
+}
+
+/* ====== Event bindings ====== */
+sendBtn.addEventListener('click', ()=> handleUserMessage(inputEl.value));
+inputEl.addEventListener('keydown', e=> { if(e.key === 'Enter') handleUserMessage(inputEl.value); });
+
+/* contact button (simple open) */
+contactBtn.addEventListener('click', ()=> {
+  const openZalo = confirm('Mở Zalo? (Cancel để mở Facebook)');
+  if(openZalo) window.open('https://zalo.me/', '_blank');
+  else window.open('https://facebook.com/', '_blank');
+});
+
+/* ====== Storage: save / load chat history ====== */
+function saveChatToStorage(){
+  try{
+    const rows = [];
+    chatArea.querySelectorAll('.msg').forEach(m=>{
+      rows.push({role: m.classList.contains('user') ? 'user' : 'bot', text: m.textContent});
+    });
+    localStorage.setItem(CHAT_KEY, JSON.stringify(rows));
+  }catch(e){ /* ignore storage errors */ }
+}
+function loadChatFromStorage(){
+  try{
+    const raw = localStorage.getItem(CHAT_KEY);
+    if(!raw) return;
+    const rows = JSON.parse(raw);
+    rows.forEach(r => {
+      if(r.role === 'user') appendUser(r.text);
+      else appendBot(r.text);
+    });
+  }catch(e){}
+}
+loadChatFromStorage();
+
+/* Accessibility: allow Escape to close emergency popup */
+document.addEventListener('keydown', (e)=>{
+  if(e.key === 'Escape' && emergPopup.style.display === 'block') hideEmergencyPopup();
+});
+
+/* On mobile, auto focus input when chat loads */
+window.addEventListener('load', ()=> {
+  setTimeout(()=> {
+    try{ inputEl.focus(); }catch(e){}
+  }, 400);
+});
+</script>
+</body>
+</html>
