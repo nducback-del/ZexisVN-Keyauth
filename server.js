@@ -1,91 +1,99 @@
+// ===== server.js =====
 import express from "express";
-import cors from "cors";
 import bodyParser from "body-parser";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import cors from "cors";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
+// ===== middleware =====
 app.use(cors());
 app.use(bodyParser.json());
-app.use(express.static(__dirname)); // để serve index.html
+app.use(express.static("public")); // chứa file index.html
 
-const ADMIN = { username: "admin", password: "123456" };
-const DATA_FILE = path.join(__dirname, "keys.json");
-if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, "[]", "utf8");
+// ===== dữ liệu tạm (lưu trong RAM) =====
+let ADMIN = { username: "admin", password: "123456" };
+let KEYS = [];
 
-const loadKeys = () => JSON.parse(fs.readFileSync(DATA_FILE));
-const saveKeys = (k) => fs.writeFileSync(DATA_FILE, JSON.stringify(k, null, 2));
-
-// Đăng nhập admin
-app.post("/api/admin-login", (req, res) => {
+// ===== Login =====
+app.post("/login", (req, res) => {
   const { username, password } = req.body;
-  if (username === ADMIN.username && password === ADMIN.password)
+  if (username === ADMIN.username && password === ADMIN.password) {
     return res.json({ success: true });
-  res.status(401).json({ success: false, message: "Sai tài khoản hoặc mật khẩu" });
+  } else {
+    return res.status(401).json({ success: false, message: "Sai tài khoản hoặc mật khẩu" });
+  }
 });
 
-// Tạo key
+// ===== Verify Key (cho app C#) =====
+app.post("/api/verify-key", (req, res) => {
+  const { key } = req.body;
+  const found = KEYS.find(k => k.key_code === key);
+  if (!found) return res.json({ success: false, message: "Key không tồn tại" });
+
+  const now = new Date();
+  const expired = new Date(found.expires_at);
+  if (expired < now) return res.json({ success: false, message: "Key hết hạn" });
+
+  res.json({ success: true, message: "Key hợp lệ", key: found });
+});
+
+// ===== Create Key =====
 app.post("/api/create-key", (req, res) => {
   const { days, devices } = req.body;
-  const keys = loadKeys();
-  const key_code = "ZXS-" + Math.random().toString(36).substring(2, 8).toUpperCase();
+  const key = `KEY-${Math.random().toString(36).substring(2, 8).toUpperCase()}-${Math.random()
+    .toString(36)
+    .substring(2, 6)
+    .toUpperCase()}`;
   const created_at = new Date();
-  const expires_at = new Date(Date.now() + days * 86400000);
-  const newKey = {
-    key_code,
+  const expires_at = new Date();
+  expires_at.setDate(created_at.getDate() + days);
+  const keyData = {
+    key_code: key,
     created_at,
     expires_at,
     allowed_devices: devices,
     is_active: true,
-    devices_list: []
   };
-  keys.push(newKey);
-  saveKeys(keys);
-  res.json({ success: true, key: newKey });
+  KEYS.push(keyData);
+  res.json({ success: true, key: keyData });
 });
 
-// Lấy danh sách key
+// ===== List Keys =====
 app.get("/api/list-keys", (req, res) => {
-  res.json(loadKeys());
+  res.json(KEYS);
 });
 
-// Gia hạn key
+// ===== Extend Key =====
 app.post("/api/extend-key", (req, res) => {
   const { key, days } = req.body;
-  const keys = loadKeys();
-  const k = keys.find((x) => x.key_code === key);
-  if (!k) return res.status(404).json({ success: false });
-  k.expires_at = new Date(new Date(k.expires_at).getTime() + days * 86400000);
-  saveKeys(keys);
+  const found = KEYS.find(k => k.key_code === key);
+  if (!found) return res.json({ success: false });
+  const expires = new Date(found.expires_at);
+  expires.setDate(expires.getDate() + days);
+  found.expires_at = expires;
   res.json({ success: true });
 });
 
-// Reset key
+// ===== Reset Key =====
 app.post("/api/reset-key", (req, res) => {
   const { key } = req.body;
-  const keys = loadKeys();
-  const k = keys.find((x) => x.key_code === key);
-  if (!k) return res.status(404).json({ success: false });
-  k.devices_list = [];
-  saveKeys(keys);
+  const found = KEYS.find(k => k.key_code === key);
+  if (!found) return res.json({ success: false });
+  found.is_active = true;
   res.json({ success: true });
 });
 
-// Xoá key
+// ===== Delete Key =====
 app.post("/api/delete-key", (req, res) => {
   const { key } = req.body;
-  let keys = loadKeys();
-  keys = keys.filter((x) => x.key_code !== key);
-  saveKeys(keys);
+  KEYS = KEYS.filter(k => k.key_code !== key);
   res.json({ success: true });
 });
 
-app.get("/", (req, res) => res.sendFile(path.join(__dirname, "index.html")));
+// ===== Home route =====
+app.get("/", (req, res) => {
+  res.sendFile(process.cwd() + "/public/index.html");
+});
 
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
