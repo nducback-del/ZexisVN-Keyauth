@@ -1,10 +1,10 @@
-// server.js (CommonJS)
+// server.js
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs'); // dùng bcryptjs cho ổn định
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
@@ -18,16 +18,14 @@ const PORT = process.env.PORT || 10000;
 const DATA_FILE = path.join(__dirname, 'keys.json');
 const CONFIG_FILE = path.join(__dirname, 'config.json');
 
-// --- CONFIG / SECRETS (set env vars in Render)
-// JWT secret for admin tokens:
+// --- CONFIG / SECRETS
 const JWT_SECRET = process.env.JWT_SECRET || 'please-change-me-jwt';
-// HMAC secret for signing keys:
 const HMAC_SECRET = process.env.HMAC_SECRET || 'please-change-me-hmac';
 
 // --- helper to read/write files
 if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, '[]', 'utf8');
+
 if (!fs.existsSync(CONFIG_FILE)) {
-  // initial config with one admin user (password bcrypt-hashed)
   const adminPassword = 'hentai';
   const hash = bcrypt.hashSync(adminPassword, 10);
   const cfg = { admin: { username: 'ZxsVN-ad', passwordHash: hash } };
@@ -73,16 +71,26 @@ function requireAdmin(req, res, next) {
   }
 }
 
-// --- ADMIN LOGIN -> return JWT
+// --- ADMIN LOGIN
 app.post('/api/admin-login', async (req, res) => {
-  const { username, password } = req.body || {};
-  const cfg = loadConfig();
-  if (!username || !password) return res.status(400).json({ success: false, message: 'Missing' });
-  if (username !== cfg.admin.username) return res.status(401).json({ success: false, message: 'Invalid' });
-  const ok = await bcrypt.compare(password, cfg.admin.passwordHash);
-  if (!ok) return res.status(401).json({ success: false, message: 'Invalid' });
-  const token = jwt.sign({ username: cfg.admin.username, iat: Math.floor(Date.now() / 1000) }, JWT_SECRET, { expiresIn: '6h' });
-  return res.json({ success: true, token });
+  try {
+    const { username, password } = req.body || {};
+    const cfg = loadConfig();
+    if (!username || !password) return res.status(400).json({ success: false, message: 'Missing username or password' });
+    if (username !== cfg.admin.username) return res.status(401).json({ success: false, message: 'Invalid username' });
+    const ok = await bcrypt.compare(password, cfg.admin.passwordHash);
+    if (!ok) return res.status(401).json({ success: false, message: 'Invalid password' });
+
+    const token = jwt.sign(
+      { username: cfg.admin.username, iat: Math.floor(Date.now() / 1000) },
+      JWT_SECRET,
+      { expiresIn: '6h' }
+    );
+    return res.json({ success: true, token });
+  } catch (e) {
+    console.error('Login error:', e);
+    return res.status(500).json({ success: false, message: 'Server error' });
+  }
 });
 
 // --- ADMIN: create key
@@ -95,7 +103,7 @@ app.post('/api/create-key', requireAdmin, (req, res) => {
   const createdAt = new Date().toISOString();
   const expiresAt = new Date(Date.now() + (days * 24 * 60 * 60 * 1000)).toISOString();
 
-  const signature = signValue(keyCode); // HMAC signature
+  const signature = signValue(keyCode);
   const record = {
     id: uuidv4(),
     key_code: keyCode,
@@ -146,43 +154,31 @@ app.post('/api/delete-key', requireAdmin, (req, res) => {
   return res.json({ success: true });
 });
 
-// --- VERIFY KEY (WinForm calls this) ---
-// Note: this endpoint is intentionally public (no JWT) because WinForm cannot hold admin JWT.
-// But it checks signature & device binding. Use HTTPS in production.
+// --- VERIFY KEY (public)
 app.post('/api/verify-key', (req, res) => {
   const { key, device_id } = req.body || {};
-  if (!key || !device_id) return res.status(400).json({ success: false, message: 'Missing' });
+  if (!key || !device_id) return res.status(400).json({ success: false, message: 'Missing key or device_id' });
 
   const keys = loadKeys();
   const found = keys.find(k => k.key_code === key);
   if (!found) return res.status(404).json({ success: false, message: 'Key not found' });
 
-  // verify signature server-side (defense against tampered key entries)
   const expectedSig = signValue(found.key_code);
-  if (expectedSig !== found.signature) {
-    return res.status(500).json({ success: false, message: 'Key signature mismatch' });
-  }
+  if (expectedSig !== found.signature) return res.status(500).json({ success: false, message: 'Key signature mismatch' });
 
-  // expiry
-  if (new Date(found.expires_at) < new Date()) {
-    return res.json({ success: false, message: 'Expired' });
-  }
+  if (new Date(found.expires_at) < new Date()) return res.json({ success: false, message: 'Expired' });
 
-  // device binding
   if (!Array.isArray(found.devices)) found.devices = [];
   if (!found.devices.includes(device_id)) {
-    if (found.devices.length >= found.allowed_devices) {
-      return res.json({ success: false, message: 'Device limit reached' });
-    }
+    if (found.devices.length >= found.allowed_devices) return res.json({ success: false, message: 'Device limit reached' });
     found.devices.push(device_id);
     saveKeys(keys);
   }
 
-  // respond success
   return res.json({ success: true, message: 'OK' });
 });
 
-// --- Serve UI if present
+// --- Serve UI
 app.get('/', (req, res) => {
   const p = path.join(__dirname, 'public', 'index.html');
   if (fs.existsSync(p)) return res.sendFile(p);
