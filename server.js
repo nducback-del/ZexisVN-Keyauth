@@ -28,9 +28,9 @@ const HMAC_SECRET = process.env.HMAC_SECRET || 'please-change-me-hmac';
 if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, '[]', 'utf8');
 if (!fs.existsSync(CONFIG_FILE)) {
   // initial config with one admin user (password bcrypt-hashed)
-  const adminPassword = '123h';
+  const adminPassword = '123321';
   const hash = bcrypt.hashSync(adminPassword, 10);
-  const cfg = { admin: { username: 'ZxsVN', passwordHash: hash } };
+  const cfg = { admin: { username: 'ZxsVN-ad', passwordHash: hash } };
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
 }
 
