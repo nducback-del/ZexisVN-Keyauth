@@ -1,4 +1,3 @@
-full server nè
 // server.js (CommonJS)
 const express = require('express');
 const bodyParser = require('body-parser');
