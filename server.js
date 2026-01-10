@@ -27,7 +27,7 @@ if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, '[]', 'utf8');
 if (!fs.existsSync(CONFIG_FILE)) {
   const adminPassword = '1';
   const hash = bcrypt.hashSync(adminPassword, 10);
-  const cfg = { admin: { username: 'ad', passwordHash: hash } };
+  const cfg = { admin: { username: 'admin', passwordHash: hash } };
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
 }
 
