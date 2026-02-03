@@ -1,4 +1,4 @@
-// server.js - Enhanced Auth API v3.0 with Advanced Features
+// server.js - Enhanced Auth API v3.1 with Mandatory API Key for Free Users
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
@@ -46,9 +46,9 @@ if (!fs.existsSync(CONFIG_FILE)) {
       passwordHash: hash 
     },
     contact: {
-      admin_profile: 'https://facebook.com/admin', // Thay link của bạn
-      telegram: '@admin_contact',
-      email: 'admin@example.com'
+      admin_profile: 'https://www.facebook.com/duc.pham.396384', // Thay link của bạn
+      telegram: '@phamcduc0',
+      email: 'monhpham15@gmail.com'
     }
   };
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
@@ -360,7 +360,8 @@ app.post('/api/create-key', requireAuth, (req, res) => {
     allowed_devices: Number(devices),
     devices: [],
     owner_id: req.user.role === 'admin' ? 'admin' : user.id,
-    owner_username: req.user.role === 'admin' ? 'admin' : user.username
+    owner_username: req.user.role === 'admin' ? 'admin' : user.username,
+    require_api_key: req.user.role === 'admin' ? false : !user.isPremium // FREE users phải dùng API Key
   };
 
   keys.push(record);
@@ -425,7 +426,9 @@ app.get('/api/my-api-code', requireAuth, (req, res) => {
   res.json({ 
     success: true, 
     apiCode: user.apiCode,
-    username: user.username 
+    username: user.username,
+    isPremium: user.isPremium,
+    note: user.isPremium ? 'Premium users không bắt buộc dùng API Key' : 'Free users BẮT BUỘC phải gửi API Key khi verify'
   });
 });
 
@@ -504,43 +507,105 @@ app.post('/api/delete-key', requireAuth, (req, res) => {
 });
 
 /* ================= VERIFY KEY (PUBLIC - FOR WINFORM/CLIENT) ================= */
+/* 🔒 THAY ĐỔI LỚN: BẮT BUỘC API CODE CHO FREE USERS */
 app.post('/api/verify-key', (req, res) => {
   const { key, device_id, api_code } = req.body || {};
   
   if (!key || !device_id) {
-    return res.status(400).json({ success: false, message: 'Thiếu key hoặc device_id' });
-  }
-
-  // Kiểm tra API code nếu có
-  if (api_code) {
-    const users = loadUsers();
-    const user = users.find(u => u.apiCode === api_code);
-    if (!user) {
-      return res.status(401).json({ success: false, message: 'API Code không hợp lệ' });
-    }
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Thiếu key hoặc device_id',
+      error_code: 'MISSING_PARAMS'
+    });
   }
 
   const keys = loadKeys();
   const found = keys.find(k => k.key_code === key);
   
   if (!found) {
-    return res.status(404).json({ success: false, message: 'Key không tồn tại' });
+    return res.status(404).json({ 
+      success: false, 
+      message: 'Key không tồn tại',
+      error_code: 'KEY_NOT_FOUND'
+    });
   }
 
+  // ⚡ KIỂM TRA API CODE CHO FREE USERS
+  if (found.require_api_key) {
+    if (!api_code) {
+      return res.status(401).json({ 
+        success: false, 
+        message: '🔒 Key này yêu cầu API Code! Tài khoản FREE phải gửi kèm api_code.',
+        error_code: 'API_CODE_REQUIRED',
+        hint: 'Lấy API Code tại: Dashboard → Cài Đặt'
+      });
+    }
+
+    // Verify API Code
+    const users = loadUsers();
+    const keyOwner = users.find(u => u.id === found.owner_id);
+    
+    if (!keyOwner) {
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Lỗi hệ thống: Không tìm thấy chủ sở hữu key',
+        error_code: 'OWNER_NOT_FOUND'
+      });
+    }
+
+    if (keyOwner.apiCode !== api_code) {
+      return res.status(401).json({ 
+        success: false, 
+        message: '❌ API Code không đúng! Vui lòng kiểm tra lại.',
+        error_code: 'INVALID_API_CODE'
+      });
+    }
+
+    // Check if user is banned/inactive
+    if (keyOwner.isBanned) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Tài khoản chủ key đã bị khóa',
+        error_code: 'OWNER_BANNED'
+      });
+    }
+
+    if (!keyOwner.isActive) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Tài khoản chủ key đã bị tạm khóa',
+        error_code: 'OWNER_INACTIVE'
+      });
+    }
+  }
+
+  // Verify signature
   const expectedSig = signValue(found.key_code);
   if (expectedSig !== found.signature) {
-    return res.status(500).json({ success: false, message: 'Chữ ký không khớp' });
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Chữ ký không khớp',
+      error_code: 'SIGNATURE_MISMATCH'
+    });
   }
 
+  // Check expiry
   if (new Date(found.expires_at) < new Date()) {
-    return res.json({ success: false, message: 'Key đã hết hạn' });
+    return res.json({ 
+      success: false, 
+      message: 'Key đã hết hạn',
+      error_code: 'KEY_EXPIRED',
+      expired_at: found.expires_at
+    });
   }
 
+  // Check device limit
   if (!found.devices.includes(device_id)) {
     if (found.devices.length >= found.allowed_devices) {
       return res.json({ 
         success: false, 
         message: 'Đã đạt giới hạn thiết bị',
+        error_code: 'DEVICE_LIMIT_REACHED',
         devices_used: found.devices.length,
         devices_allowed: found.allowed_devices
       });
@@ -550,12 +615,14 @@ app.post('/api/verify-key', (req, res) => {
     saveKeys(keys);
   }
 
+  // ✅ SUCCESS
   res.json({ 
     success: true, 
     message: 'Xác thực thành công', 
     type: found.type,
     expires_at: found.expires_at,
-    devices_remaining: found.allowed_devices - found.devices.length
+    devices_remaining: found.allowed_devices - found.devices.length,
+    is_premium_key: !found.require_api_key
   });
 });
 
@@ -593,8 +660,17 @@ app.post('/api/admin/grant-premium', requireAdmin, (req, res) => {
 
   user.isPremium = true;
   saveUsers(users);
+
+  // Update all user's keys to not require API key
+  const keys = loadKeys();
+  keys.forEach(k => {
+    if (k.owner_id === userId) {
+      k.require_api_key = false;
+    }
+  });
+  saveKeys(keys);
   
-  res.json({ success: true, message: 'Đã cấp Premium' });
+  res.json({ success: true, message: 'Đã cấp Premium. Tất cả key của user không còn yêu cầu API Code.' });
 });
 
 // Revoke premium
@@ -610,8 +686,17 @@ app.post('/api/admin/revoke-premium', requireAdmin, (req, res) => {
 
   user.isPremium = false;
   saveUsers(users);
+
+  // Update all user's keys to require API key
+  const keys = loadKeys();
+  keys.forEach(k => {
+    if (k.owner_id === userId) {
+      k.require_api_key = true;
+    }
+  });
+  saveKeys(keys);
   
-  res.json({ success: true, message: 'Đã thu hồi Premium' });
+  res.json({ success: true, message: 'Đã thu hồi Premium. Tất cả key của user giờ yêu cầu API Code.' });
 });
 
 // Ban user
@@ -702,6 +787,7 @@ app.get('/api/admin/stats', requireAdmin, (req, res) => {
     bannedUsers: users.filter(u => u.isBanned).length,
     totalKeys: keys.length,
     activeKeys: keys.filter(k => new Date(k.expires_at) > now).length,
+    protectedKeys: keys.filter(k => k.require_api_key).length,
     totalDevices: devices.length
   };
 
@@ -721,23 +807,32 @@ app.get('/', (req, res) => {
 
 app.get('/api', (req, res) => {
   res.json({
-    name: "AuthAPI v3.0 - Enhanced Multi-User License System",
-    version: "3.0.0",
+    name: "AuthAPI v3.1 - Enhanced with Mandatory API Key for Free Users",
+    version: "3.1.0",
     features: [
       "Multi-user authentication",
       "10 keys limit for free users",
       "3 accounts per device limit",
+      "🔒 Mandatory API Code for FREE users",
+      "Premium users bypass API Code requirement",
       "Unique API code per account",
       "Support for C#, Python, C++, CMD, HTML injection",
       "IPA menu & Internal menu support",
       "Admin can create unlimited keys"
-    ]
+    ],
+    security: {
+      free_users: "MUST provide api_code when verifying keys",
+      premium_users: "Can verify without api_code",
+      admin_keys: "Never require api_code"
+    }
   });
 });
 
 app.listen(PORT, () => {
-  console.log('✅ AuthAPI v3.0 Server running on port', PORT);
+  console.log('✅ AuthAPI v3.1 Server running on port', PORT);
   console.log('📝 Free users: 10 keys limit');
   console.log('💻 Device limit: 3 accounts per device');
   console.log('🔑 Each user gets unique API code');
+  console.log('🔒 FREE USERS: API Code BẮT BUỘC khi verify key!');
+  console.log('⭐ PREMIUM USERS: Không cần API Code');
 });
