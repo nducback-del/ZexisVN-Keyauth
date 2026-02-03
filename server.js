@@ -94,7 +94,7 @@ function randomChunk(len) {
   return Math.random().toString(36).substring(2, 2 + len).toUpperCase();
 }
 
-function generateKey(type = "ZXS") {
+function generateKey(type = "KEY") {
   const prefix = type;
   return `${prefix}-${randomChunk(6)}-${randomChunk(4)}`;
 }
@@ -345,7 +345,7 @@ app.post('/api/create-key', requireAuth, (req, res) => {
   }
 
   const keys = loadKeys();
-  const keyCode = generateKey(type || "ZXS");
+  const keyCode = generateKey(type || "KEY");
   const createdAt = new Date().toISOString();
   const expiresAt = new Date(Date.now() + days * 86400000).toISOString();
   const signature = signValue(keyCode);
@@ -353,7 +353,7 @@ app.post('/api/create-key', requireAuth, (req, res) => {
   const record = {
     id: uuidv4(),
     key_code: keyCode,
-    type: type || "ZXS",
+    type: type || "KEY",
     signature,
     created_at: createdAt,
     expires_at: expiresAt,
