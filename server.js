@@ -1,4 +1,4 @@
-// server.js - AuthAPI v3.3 ULTIMATE - Fixed Email Validation
+// server.js - AuthAPI v3.3 ULTIMATE - No Email Validation
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
@@ -11,7 +11,7 @@ const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 
-/* ================= ERROR HANDLING (từ v3.2) ================= */
+/* ================= ERROR HANDLING ================= */
 process.on('uncaughtException', (err) => {
   console.error('❌ UNCAUGHT EXCEPTION:', err);
 });
@@ -34,7 +34,7 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(express.static('public'));
 
-// Request logging (từ v3.2)
+// Request logging
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
@@ -56,14 +56,7 @@ const HMAC_SECRET = process.env.HMAC_SECRET || 'please-change-hmac-secret-2025';
 const FREE_KEY_LIMIT = 10;
 const MAX_ACCOUNTS_PER_DEVICE = 3;
 
-/* ================= EMAIL VALIDATION HELPER ================= */
-function isValidEmail(email) {
-  // Regex chuẩn RFC 5322 đơn giản
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  return emailRegex.test(email);
-}
-
-/* ================= BACKUP SYSTEM (từ v3.2) ================= */
+/* ================= BACKUP SYSTEM ================= */
 if (!fs.existsSync(BACKUP_DIR)) {
   fs.mkdirSync(BACKUP_DIR, { recursive: true });
   console.log('✅ Created backup directory');
@@ -118,7 +111,7 @@ function cleanOldBackups() {
 // Auto backup every 6 hours
 setInterval(createBackup, 6 * 60 * 60 * 1000);
 
-/* ================= SAFE FILE OPERATIONS (từ v3.2) ================= */
+/* ================= SAFE FILE OPERATIONS ================= */
 function safeLoadJSON(file, defaultValue = []) {
   try {
     if (fs.existsSync(file)) {
@@ -234,7 +227,7 @@ function saveLogs(logs) {
   return safeSaveJSON(LOGS_FILE, logs);
 }
 
-/* ================= ACTIVITY LOGGING (từ v3.2) ================= */
+/* ================= ACTIVITY LOGGING ================= */
 function logActivity(action, userId, username, details = {}) {
   try {
     const logs = loadLogs();
@@ -323,7 +316,7 @@ function requireAuth(req, res, next) {
   }
 }
 
-/* ================= MAINTENANCE MODE (từ v3.2) ================= */
+/* ================= MAINTENANCE MODE ================= */
 function checkMaintenance(req, res, next) {
   const config = loadConfig();
   if (config.settings?.maintenance_mode && !req.path.includes('/admin')) {
@@ -368,7 +361,7 @@ app.post('/api/admin-login', async (req, res) => {
   }
 });
 
-/* ================= USER REGISTRATION (FIXED EMAIL VALIDATION) ================= */
+/* ================= USER REGISTRATION (NO EMAIL VALIDATION) ================= */
 app.post('/api/register', async (req, res) => {
   try {
     const { username, password, email } = req.body || {};
@@ -381,20 +374,11 @@ app.post('/api/register', async (req, res) => {
       });
     }
 
-    // Kiểm tra đầy đủ thông tin
+    // Kiểm tra đầu vào cơ bản - email có thể là bất kỳ
     if (!username || !password || !email) {
       return res.status(400).json({ success: false, message: 'Vui lòng điền đầy đủ thông tin' });
     }
 
-    // ✅ VALIDATE EMAIL FORMAT
-    if (!isValidEmail(email)) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Email không hợp lệ. Vui lòng nhập đúng định dạng email (vd: user@example.com)' 
-      });
-    }
-
-    // Validate độ dài
     if (username.length < 3 || password.length < 6) {
       return res.status(400).json({ 
         success: false, 
@@ -402,19 +386,9 @@ app.post('/api/register', async (req, res) => {
       });
     }
 
-    const users = loadUsers();
-    
-    // Kiểm tra username đã tồn tại
-    if (users.find(u => u.username === username)) {
-      return res.status(400).json({ success: false, message: 'Tên đăng nhập đã tồn tại' });
-    }
-    
-    // Kiểm tra email đã tồn tại
-    if (users.find(u => u.email === email)) {
-      return res.status(400).json({ success: false, message: 'Email đã được sử dụng' });
-    }
+    // Không kiểm tra định dạng email - cho phép nhập bất kỳ
+    // Email chỉ cần có giá trị, không cần hợp lệ
 
-    // ✅ GIỚI HẠN 3 TÀI KHOẢN / THIẾT BỊ (GIỮ NGUYÊN)
     const deviceId = generateDeviceId(req);
     const devices = loadDevices();
     const deviceRecord = devices.find(d => d.device_id === deviceId);
@@ -426,15 +400,24 @@ app.post('/api/register', async (req, res) => {
       });
     }
 
-    // Hash password
+    const users = loadUsers();
+    
+    if (users.find(u => u.username === username)) {
+      return res.status(400).json({ success: false, message: 'Tên đăng nhập đã tồn tại' });
+    }
+    
+    // Vẫn kiểm tra email trùng để tránh duplicate
+    if (users.find(u => u.email === email)) {
+      return res.status(400).json({ success: false, message: 'Email đã được sử dụng' });
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
     const apiCode = generateAPICode();
     
-    // Tạo user mới
     const newUser = {
       id: uuidv4(),
       username,
-      email,
+      email, // Lưu email bất kỳ mà không xác thực
       passwordHash: hashedPassword,
       role: 'user',
       isPremium: false,
@@ -446,13 +429,13 @@ app.post('/api/register', async (req, res) => {
       apiCode: apiCode,
       deviceId: deviceId,
       totalKeysCreated: 0,
-      totalVerifications: 0
+      totalVerifications: 0,
+      emailVerified: false // Đánh dấu là chưa xác thực (optional)
     };
 
     users.push(newUser);
     saveUsers(users);
 
-    // Cập nhật device tracking
     if (deviceRecord) {
       deviceRecord.accounts.push(newUser.id);
     } else {
@@ -546,7 +529,7 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-/* ================= CREATE KEY (ENHANCED với Custom Key từ v3.2) ================= */
+/* ================= CREATE KEY (ENHANCED với Custom Key) ================= */
 app.post('/api/create-key', requireAuth, (req, res) => {
   try {
     const { days, devices, type, customKey } = req.body || {};
@@ -584,7 +567,7 @@ app.post('/api/create-key', requireAuth, (req, res) => {
         });
       }
 
-      // Custom key chỉ dành cho Premium (từ v3.2)
+      // Custom key chỉ dành cho Premium
       if (customKey && !user.isPremium) {
         return res.status(403).json({ 
           success: false, 
@@ -595,7 +578,7 @@ app.post('/api/create-key', requireAuth, (req, res) => {
 
     let keyCode;
     
-    // Custom key logic (từ v3.2)
+    // Custom key logic
     if (customKey && customKey.trim()) {
       keyCode = customKey.trim();
       const keys = loadKeys();
@@ -655,7 +638,7 @@ app.post('/api/create-key', requireAuth, (req, res) => {
   }
 });
 
-/* ================= BULK CREATE KEYS (từ v3.2) ================= */
+/* ================= BULK CREATE KEYS ================= */
 app.post('/api/bulk-create-keys', requireAuth, (req, res) => {
   try {
     const { count, days, devices, type } = req.body || {};
@@ -819,7 +802,7 @@ app.get('/api/my-api-code', requireAuth, (req, res) => {
   }
 });
 
-/* ================= RESET API CODE (từ v3.2) ================= */
+/* ================= RESET API CODE ================= */
 app.post('/api/reset-api-code', requireAuth, (req, res) => {
   try {
     const users = loadUsers();
@@ -1007,7 +990,7 @@ app.post('/api/verify-key', (req, res) => {
         });
       }
 
-      // Update user verification count (từ v3.2)
+      // Update user verification count
       keyOwner.totalVerifications = (keyOwner.totalVerifications || 0) + 1;
       saveUsers(users);
     }
@@ -1047,7 +1030,7 @@ app.post('/api/verify-key', (req, res) => {
       found.devices.push(device_id);
     }
 
-    // Update verification stats (từ v3.2)
+    // Update verification stats
     found.total_verifications = (found.total_verifications || 0) + 1;
     found.last_verified = new Date().toISOString();
     saveKeys(keys);
@@ -1070,7 +1053,7 @@ app.post('/api/verify-key', (req, res) => {
   }
 });
 
-/* ================= KEY INFO (từ v3.2) ================= */
+/* ================= KEY INFO ================= */
 app.post('/api/key-info', (req, res) => {
   try {
     const { key } = req.body || {};
@@ -1300,7 +1283,7 @@ app.post('/api/admin/delete-user', requireAdmin, (req, res) => {
   }
 });
 
-/* ================= ADMIN: SETTINGS (từ v3.2) ================= */
+/* ================= ADMIN: SETTINGS ================= */
 app.get('/api/admin/settings', requireAdmin, (req, res) => {
   try {
     const config = loadConfig();
@@ -1326,7 +1309,7 @@ app.post('/api/admin/settings', requireAdmin, (req, res) => {
   }
 });
 
-/* ================= ADMIN: LOGS (từ v3.2) ================= */
+/* ================= ADMIN: LOGS ================= */
 app.get('/api/admin/logs', requireAdmin, (req, res) => {
   try {
     const logs = loadLogs();
@@ -1338,7 +1321,7 @@ app.get('/api/admin/logs', requireAdmin, (req, res) => {
   }
 });
 
-/* ================= ADMIN: BACKUP (từ v3.2) ================= */
+/* ================= ADMIN: BACKUP ================= */
 app.post('/api/admin/backup', requireAdmin, (req, res) => {
   try {
     createBackup();
@@ -1414,13 +1397,13 @@ app.get('/', (req, res) => {
 app.get('/api', (req, res) => {
   const config = loadConfig();
   res.json({
-    name: "AuthAPI v3.3 ULTIMATE - Fixed",
-    version: "3.3.1",
+    name: "AuthAPI v3.3 ULTIMATE - No Email Validation",
+    version: "3.3.0",
     status: "online",
     maintenance_mode: config.settings?.maintenance_mode || false,
     features: [
       "✅ Multi-user authentication",
-      "✅ Email format validation",
+      "✅ No email validation (accept any email)",
       "✅ 10 keys limit for free users",
       "✅ 3 accounts per device limit",
       "🔒 Mandatory API Code for FREE users",
@@ -1437,6 +1420,7 @@ app.get('/api', (req, res) => {
       "🔧 Maintenance mode support"
     ],
     security: {
+      email_verification: "DISABLED - Accept any email format",
       free_users: "MUST provide api_code when verifying keys",
       premium_users: "Can verify without api_code",
       admin_keys: "Never require api_code"
@@ -1444,7 +1428,7 @@ app.get('/api', (req, res) => {
   });
 });
 
-/* ================= HEALTH CHECK (từ v3.2) ================= */
+/* ================= HEALTH CHECK ================= */
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -1453,7 +1437,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-/* ================= 404 HANDLER (từ v3.2) ================= */
+/* ================= 404 HANDLER ================= */
 app.use((req, res) => {
   res.status(404).json({
     success: false,
@@ -1465,13 +1449,11 @@ app.use((req, res) => {
 /* ================= SERVER START ================= */
 const server = app.listen(PORT, () => {
   console.log('╔═══════════════════════════════════════════════════╗');
-  console.log('║   AuthAPI v3.3.1 - FIXED EMAIL VALIDATION        ║');
-  console.log('║   Merged: v3.1 + v3.2 + Email Fix                ║');
+  console.log('║   AuthAPI v3.3 ULTIMATE - No Email Validation    ║');
   console.log('╚═══════════════════════════════════════════════════╝');
   console.log(`✅ Server: http://localhost:${PORT}`);
+  console.log('📧 Email validation: DISABLED');
   console.log('🔑 Free: 10 keys | Premium: Unlimited');
-  console.log('📧 Email validation: ACTIVE');
-  console.log('📱 Device limit: 3 accounts/device');
   console.log('💎 Custom keys: Premium only');
   console.log('📦 Bulk create: Premium only (1-100 keys)');
   console.log('💾 Auto backup: Every 6 hours');
@@ -1484,7 +1466,7 @@ const server = app.listen(PORT, () => {
   createBackup();
 });
 
-/* ================= GRACEFUL SHUTDOWN (từ v3.2) ================= */
+/* ================= GRACEFUL SHUTDOWN ================= */
 process.on('SIGTERM', () => {
   console.log('SIGTERM received...');
   createBackup();
