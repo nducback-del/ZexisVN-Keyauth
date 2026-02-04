@@ -406,10 +406,7 @@ app.post('/api/register', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Tên đăng nhập đã tồn tại' });
     }
     
-    // Vẫn kiểm tra email trùng để tránh duplicate
-    if (users.find(u => u.email === email)) {
-      return res.status(400).json({ success: false, message: 'Email đã được sử dụng' });
-    }
+    // ĐÃ BỎ: Không kiểm tra email trùng - cho phép nhiều acc cùng 1 email
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const apiCode = generateAPICode();
@@ -1403,9 +1400,9 @@ app.get('/api', (req, res) => {
     maintenance_mode: config.settings?.maintenance_mode || false,
     features: [
       "✅ Multi-user authentication",
-      "✅ No email validation (accept any email)",
+      "✅ Same email for multiple accounts",
       "✅ 10 keys limit for free users",
-      "✅ 3 accounts per device limit",
+      "✅ 3 accounts per device limit (strict)",
       "🔒 Mandatory API Code for FREE users",
       "⭐ Premium users bypass API Code",
       "💎 Custom key creation (Premium only)",
@@ -1414,13 +1411,14 @@ app.get('/api', (req, res) => {
       "📊 Activity logging system",
       "🔄 API Code reset",
       "🔐 HMAC signature verification",
-      "📱 Device tracking",
+      "📱 Device tracking (by UserAgent + IP)",
       "🛡️ Anti-crash error handling",
       "⚙️ System settings management",
       "🔧 Maintenance mode support"
     ],
     security: {
-      email_verification: "DISABLED - Accept any email format",
+      email_verification: "DISABLED - Accept any email, allow duplicates",
+      device_limit: "3 accounts per device (UserAgent + IP hash)",
       free_users: "MUST provide api_code when verifying keys",
       premium_users: "Can verify without api_code",
       admin_keys: "Never require api_code"
@@ -1449,10 +1447,11 @@ app.use((req, res) => {
 /* ================= SERVER START ================= */
 const server = app.listen(PORT, () => {
   console.log('╔═══════════════════════════════════════════════════╗');
-  console.log('║   AuthAPI v3.3 ULTIMATE - No Email Validation    ║');
+  console.log('║   AuthAPI v3.3 ULTIMATE - Multi Email Support    ║');
   console.log('╚═══════════════════════════════════════════════════╝');
   console.log(`✅ Server: http://localhost:${PORT}`);
-  console.log('📧 Email validation: DISABLED');
+  console.log('📧 Same email: Multiple accounts allowed');
+  console.log('🔒 Device limit: Max 3 accounts per device');
   console.log('🔑 Free: 10 keys | Premium: Unlimited');
   console.log('💎 Custom keys: Premium only');
   console.log('📦 Bulk create: Premium only (1-100 keys)');
