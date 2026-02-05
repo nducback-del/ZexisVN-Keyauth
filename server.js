@@ -1,4 +1,4 @@
-// server.js - AuthAPI v3.4 ULTIMATE - Anti-Crash + VIP Features
+// server.js - AuthAPI v3.5 ULTIMATE - Anti-Crash + VIP Features + AI (Premium Only)
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
@@ -20,18 +20,27 @@ const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 const DEVICES_FILE = path.join(DATA_DIR, 'devices.json');
 const LOGS_FILE = path.join(DATA_DIR, 'activity_logs.json');
+const AI_LOGS_FILE = path.join(DATA_DIR, 'ai_logs.json');
 const BACKUP_DIR = path.join(DATA_DIR, 'backups');
 const LOCK_DIR = path.join(DATA_DIR, 'locks');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'please-change-jwt-secret-2025';
 const HMAC_SECRET = process.env.HMAC_SECRET || 'please-change-hmac-secret-2025';
 
+// AI API Keys (set in environment variables)
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
+
 const FREE_KEY_LIMIT = 10;
 const MAX_ACCOUNTS_PER_DEVICE = 3;
-const MAX_MEMORY_MB = 450; // Alert if > 450MB
+const MAX_MEMORY_MB = 450;
 const MAX_LOGS = 1000;
-const LOCK_TIMEOUT = 5000; // 5 seconds
+const LOCK_TIMEOUT = 5000;
 const MAX_RETRY = 3;
+
+// AI Limits for Premium Users
+const AI_DAILY_LIMIT_PREMIUM = 100; // 100 requests/day for premium
+const AI_RATE_LIMIT_MS = 3000; // 3 seconds between requests
 
 /* ================= MEMORY MONITORING ================= */
 let memoryWarningCount = 0;
@@ -56,13 +65,12 @@ function monitorMemory() {
   }
 }
 
-setInterval(monitorMemory, 30000); // Check every 30s
+setInterval(monitorMemory, 30000);
 
 /* ================= ERROR HANDLING ================= */
 process.on('uncaughtException', (err) => {
   console.error('❌ UNCAUGHT EXCEPTION:', err);
   console.error('Stack:', err.stack);
-  // Don't exit - log and continue
 });
 
 process.on('unhandledRejection', (reason, promise) => {
@@ -89,7 +97,6 @@ app.use(cors());
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(express.static('public'));
 
-// Request logging with timeout
 app.use((req, res, next) => {
   const startTime = Date.now();
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
@@ -104,9 +111,8 @@ app.use((req, res, next) => {
   next();
 });
 
-// Request timeout
 app.use((req, res, next) => {
-  req.setTimeout(10000); // 10 seconds
+  req.setTimeout(30000); // 30 seconds for AI requests
   next();
 });
 
@@ -125,7 +131,6 @@ class FileLock {
     
     while (true) {
       try {
-        // Try to create lock file exclusively
         await fs.writeFile(lockFile, process.pid.toString(), { flag: 'wx' });
         this.locks.set(filename, lockFile);
         return true;
@@ -134,7 +139,6 @@ class FileLock {
           throw err;
         }
         
-        // Check if lock is stale
         try {
           const stats = await fs.stat(lockFile);
           const lockAge = Date.now() - stats.mtimeMs;
@@ -145,16 +149,13 @@ class FileLock {
             continue;
           }
         } catch (statErr) {
-          // Lock file disappeared, try again
           continue;
         }
         
-        // Check timeout
         if (Date.now() - startTime > LOCK_TIMEOUT) {
           throw new Error(`Lock timeout for ${filename}`);
         }
         
-        // Wait and retry
         await new Promise(resolve => setTimeout(resolve, 50));
       }
     }
@@ -194,7 +195,7 @@ async function createBackup() {
     
     await fs.mkdir(backupSubDir, { recursive: true });
 
-    const filesToBackup = [DATA_FILE, USERS_FILE, CONFIG_FILE, DEVICES_FILE, LOGS_FILE];
+    const filesToBackup = [DATA_FILE, USERS_FILE, CONFIG_FILE, DEVICES_FILE, LOGS_FILE, AI_LOGS_FILE];
     
     for (const file of filesToBackup) {
       try {
@@ -238,12 +239,11 @@ async function cleanOldBackups() {
   }
 }
 
-// Auto backup every 6 hours
 setInterval(() => {
   createBackup().catch(err => console.error('Scheduled backup failed:', err));
 }, 6 * 60 * 60 * 1000);
 
-/* ================= SAFE FILE OPERATIONS WITH RETRY ================= */
+/* ================= SAFE FILE OPERATIONS ================= */
 async function safeLoadJSON(file, defaultValue = []) {
   for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
     try {
@@ -281,18 +281,12 @@ async function safeSaveJSON(file, data) {
     try {
       await fileLock.acquire(filename);
       
-      // Check disk space (basic check)
       const tempFile = file + '.tmp';
       const jsonStr = JSON.stringify(data, null, 2);
       
-      // Write to temp file first
       await fs.writeFile(tempFile, jsonStr, 'utf8');
-      
-      // Verify temp file
       const tempData = await fs.readFile(tempFile, 'utf8');
-      JSON.parse(tempData); // Verify it's valid JSON
-      
-      // Atomic rename
+      JSON.parse(tempData);
       await fs.rename(tempFile, file);
       
       await fileLock.release(filename);
@@ -315,7 +309,6 @@ async function safeSaveJSON(file, data) {
 /* ================= INIT FILES ================= */
 async function initializeFiles() {
   try {
-    // Ensure data directory exists
     await fs.mkdir(DATA_DIR, { recursive: true });
     
     if (!fsSync.existsSync(DATA_FILE)) {
@@ -338,6 +331,11 @@ async function initializeFiles() {
       console.log('✅ Initialized activity_logs.json');
     }
 
+    if (!fsSync.existsSync(AI_LOGS_FILE)) {
+      await safeSaveJSON(AI_LOGS_FILE, []);
+      console.log('✅ Initialized ai_logs.json');
+    }
+
     if (!fsSync.existsSync(CONFIG_FILE)) {
       const adminPassword = process.env.ADMIN_PASSWORD || '1';
       const hash = await bcrypt.hash(adminPassword, 10);
@@ -355,7 +353,9 @@ async function initializeFiles() {
           maintenance_mode: false,
           registration_enabled: true,
           max_key_days: 365,
-          enable_email_verification: false
+          enable_email_verification: false,
+          ai_enabled: true,
+          ai_provider: 'openai' // or 'anthropic'
         }
       };
       await safeSaveJSON(CONFIG_FILE, cfg);
@@ -409,11 +409,21 @@ async function loadLogs() {
 }
 
 async function saveLogs(logs) {
-  // Keep only last MAX_LOGS entries
   if (logs.length > MAX_LOGS) {
     logs = logs.slice(-MAX_LOGS);
   }
   return await safeSaveJSON(LOGS_FILE, logs);
+}
+
+async function loadAILogs() {
+  return await safeLoadJSON(AI_LOGS_FILE, []);
+}
+
+async function saveAILogs(logs) {
+  if (logs.length > MAX_LOGS) {
+    logs = logs.slice(-MAX_LOGS);
+  }
+  return await safeSaveJSON(AI_LOGS_FILE, logs);
 }
 
 /* ================= ACTIVITY LOGGING ================= */
@@ -434,6 +444,25 @@ async function logActivity(action, userId, username, details = {}) {
     await saveLogs(logs);
   } catch(err) {
     console.error('❌ Log error:', err);
+  }
+}
+
+async function logAIUsage(userId, username, type, details = {}) {
+  try {
+    const logs = await loadAILogs();
+    const log = {
+      id: uuidv4(),
+      userId,
+      username,
+      type,
+      details,
+      timestamp: new Date().toISOString()
+    };
+    
+    logs.push(log);
+    await saveAILogs(logs);
+  } catch(err) {
+    console.error('❌ AI Log error:', err);
   }
 }
 
@@ -497,6 +526,149 @@ function requireAuth(req, res, next) {
     console.error('Auth error:', err);
     return res.status(401).json({ error: 'Token invalid' });
   }
+}
+
+function requirePremium(req, res, next) {
+  if (!req.user.isPremium && req.user.role !== 'admin') {
+    return res.status(403).json({
+      success: false,
+      message: '🔒 Tính năng này chỉ dành cho Premium users!',
+      error_code: 'PREMIUM_REQUIRED'
+    });
+  }
+  next();
+}
+
+/* ================= AI RATE LIMITING ================= */
+const aiRateLimits = new Map();
+
+async function checkAIRateLimit(userId) {
+  const now = Date.now();
+  const userLimit = aiRateLimits.get(userId);
+  
+  if (!userLimit) {
+    aiRateLimits.set(userId, { lastRequest: now, count: 1, resetAt: now + 86400000 });
+    return { allowed: true, remaining: AI_DAILY_LIMIT_PREMIUM - 1 };
+  }
+
+  // Reset daily limit
+  if (now > userLimit.resetAt) {
+    aiRateLimits.set(userId, { lastRequest: now, count: 1, resetAt: now + 86400000 });
+    return { allowed: true, remaining: AI_DAILY_LIMIT_PREMIUM - 1 };
+  }
+
+  // Check rate limit (3 seconds between requests)
+  if (now - userLimit.lastRequest < AI_RATE_LIMIT_MS) {
+    return { 
+      allowed: false, 
+      remaining: AI_DAILY_LIMIT_PREMIUM - userLimit.count,
+      error: 'Vui lòng chờ 3 giây giữa các request'
+    };
+  }
+
+  // Check daily limit
+  if (userLimit.count >= AI_DAILY_LIMIT_PREMIUM) {
+    return { 
+      allowed: false, 
+      remaining: 0,
+      error: `Đã đạt giới hạn ${AI_DAILY_LIMIT_PREMIUM} requests/ngày`
+    };
+  }
+
+  userLimit.count++;
+  userLimit.lastRequest = now;
+  aiRateLimits.set(userId, userLimit);
+
+  return { allowed: true, remaining: AI_DAILY_LIMIT_PREMIUM - userLimit.count };
+}
+
+/* ================= AI FUNCTIONS ================= */
+
+// OpenAI Chat
+async function callOpenAI(prompt, model = 'gpt-3.5-turbo') {
+  if (!OPENAI_API_KEY) {
+    throw new Error('OpenAI API key not configured');
+  }
+
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${OPENAI_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: model,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 1000,
+      temperature: 0.7
+    })
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error?.message || 'OpenAI API error');
+  }
+
+  const data = await response.json();
+  return data.choices[0].message.content;
+}
+
+// Anthropic Claude
+async function callAnthropic(prompt, model = 'claude-3-haiku-20240307') {
+  if (!ANTHROPIC_API_KEY) {
+    throw new Error('Anthropic API key not configured');
+  }
+
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model: model,
+      max_tokens: 1000,
+      messages: [{ role: 'user', content: prompt }]
+    })
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error?.message || 'Anthropic API error');
+  }
+
+  const data = await response.json();
+  return data.content[0].text;
+}
+
+// DALL-E Image Generation
+async function generateImage(prompt) {
+  if (!OPENAI_API_KEY) {
+    throw new Error('OpenAI API key not configured');
+  }
+
+  const response = await fetch('https://api.openai.com/v1/images/generations', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${OPENAI_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: 'dall-e-3',
+      prompt: prompt,
+      n: 1,
+      size: '1024x1024'
+    })
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error?.message || 'Image generation error');
+  }
+
+  const data = await response.json();
+  return data.data[0].url;
 }
 
 /* ================= MAINTENANCE MODE ================= */
@@ -604,6 +776,7 @@ app.post('/api/register', async (req, res) => {
       deviceId: deviceId,
       totalKeysCreated: 0,
       totalVerifications: 0,
+      aiUsageCount: 0,
       emailVerified: false
     };
 
@@ -694,7 +867,8 @@ app.post('/api/login', async (req, res) => {
         email: user.email,
         isPremium: user.isPremium,
         keyCount: user.keyCount,
-        apiCode: user.apiCode
+        apiCode: user.apiCode,
+        aiAccess: user.isPremium
       }
     });
   } catch(err) {
@@ -703,7 +877,287 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-/* ================= CREATE KEY (VIP can create custom keys) ================= */
+/* ================= AI ENDPOINTS (PREMIUM ONLY) ================= */
+
+// AI Chat
+app.post('/api/ai/chat', requireAuth, requirePremium, async (req, res) => {
+  try {
+    const { prompt, model } = req.body || {};
+    
+    if (!prompt) {
+      return res.status(400).json({ success: false, message: 'Vui lòng nhập prompt' });
+    }
+
+    const rateLimit = await checkAIRateLimit(req.user.userId);
+    if (!rateLimit.allowed) {
+      return res.status(429).json({ 
+        success: false, 
+        message: rateLimit.error,
+        remaining: rateLimit.remaining
+      });
+    }
+
+    const config = await loadConfig();
+    const provider = config.settings?.ai_provider || 'openai';
+
+    let response;
+    if (provider === 'openai') {
+      response = await callOpenAI(prompt, model || 'gpt-3.5-turbo');
+    } else if (provider === 'anthropic') {
+      response = await callAnthropic(prompt, model || 'claude-3-haiku-20240307');
+    } else {
+      throw new Error('Invalid AI provider');
+    }
+
+    // Update user AI usage
+    const users = await loadUsers();
+    const user = users.find(u => u.id === req.user.userId);
+    if (user) {
+      user.aiUsageCount = (user.aiUsageCount || 0) + 1;
+      await saveUsers(users);
+    }
+
+    await logAIUsage(req.user.userId, req.user.username, 'chat', { 
+      provider, 
+      model: model || 'default',
+      promptLength: prompt.length 
+    });
+
+    res.json({
+      success: true,
+      response: response,
+      provider: provider,
+      remaining: rateLimit.remaining
+    });
+  } catch(err) {
+    console.error('AI Chat error:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: err.message || 'AI service error' 
+    });
+  }
+});
+
+// AI Image Generation
+app.post('/api/ai/image', requireAuth, requirePremium, async (req, res) => {
+  try {
+    const { prompt } = req.body || {};
+    
+    if (!prompt) {
+      return res.status(400).json({ success: false, message: 'Vui lòng nhập prompt' });
+    }
+
+    const rateLimit = await checkAIRateLimit(req.user.userId);
+    if (!rateLimit.allowed) {
+      return res.status(429).json({ 
+        success: false, 
+        message: rateLimit.error,
+        remaining: rateLimit.remaining
+      });
+    }
+
+    const imageUrl = await generateImage(prompt);
+
+    // Update user AI usage
+    const users = await loadUsers();
+    const user = users.find(u => u.id === req.user.userId);
+    if (user) {
+      user.aiUsageCount = (user.aiUsageCount || 0) + 1;
+      await saveUsers(users);
+    }
+
+    await logAIUsage(req.user.userId, req.user.username, 'image', { 
+      promptLength: prompt.length 
+    });
+
+    res.json({
+      success: true,
+      imageUrl: imageUrl,
+      remaining: rateLimit.remaining
+    });
+  } catch(err) {
+    console.error('AI Image error:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: err.message || 'Image generation error' 
+    });
+  }
+});
+
+// AI Code Helper
+app.post('/api/ai/code', requireAuth, requirePremium, async (req, res) => {
+  try {
+    const { code, task } = req.body || {};
+    
+    if (!task) {
+      return res.status(400).json({ success: false, message: 'Vui lòng nhập yêu cầu' });
+    }
+
+    const rateLimit = await checkAIRateLimit(req.user.userId);
+    if (!rateLimit.allowed) {
+      return res.status(429).json({ 
+        success: false, 
+        message: rateLimit.error,
+        remaining: rateLimit.remaining
+      });
+    }
+
+    const prompt = code 
+      ? `Task: ${task}\n\nCode:\n${code}\n\nPlease help with this code.`
+      : `Task: ${task}\n\nPlease generate code for this task.`;
+
+    const config = await loadConfig();
+    const provider = config.settings?.ai_provider || 'openai';
+
+    let response;
+    if (provider === 'openai') {
+      response = await callOpenAI(prompt, 'gpt-4');
+    } else {
+      response = await callAnthropic(prompt, 'claude-3-sonnet-20240229');
+    }
+
+    // Update user AI usage
+    const users = await loadUsers();
+    const user = users.find(u => u.id === req.user.userId);
+    if (user) {
+      user.aiUsageCount = (user.aiUsageCount || 0) + 1;
+      await saveUsers(users);
+    }
+
+    await logAIUsage(req.user.userId, req.user.username, 'code', { 
+      provider,
+      hasCode: !!code,
+      taskLength: task.length
+    });
+
+    res.json({
+      success: true,
+      response: response,
+      provider: provider,
+      remaining: rateLimit.remaining
+    });
+  } catch(err) {
+    console.error('AI Code error:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: err.message || 'AI service error' 
+    });
+  }
+});
+
+// AI Text Analysis
+app.post('/api/ai/analyze', requireAuth, requirePremium, async (req, res) => {
+  try {
+    const { text, analysisType } = req.body || {};
+    
+    if (!text) {
+      return res.status(400).json({ success: false, message: 'Vui lòng nhập text' });
+    }
+
+    const rateLimit = await checkAIRateLimit(req.user.userId);
+    if (!rateLimit.allowed) {
+      return res.status(429).json({ 
+        success: false, 
+        message: rateLimit.error,
+        remaining: rateLimit.remaining
+      });
+    }
+
+    const prompts = {
+      sentiment: `Analyze the sentiment of this text: "${text}"`,
+      summary: `Summarize this text: "${text}"`,
+      keywords: `Extract key topics from this text: "${text}"`,
+      translate: `Translate this to Vietnamese: "${text}"`
+    };
+
+    const prompt = prompts[analysisType] || `Analyze this text: "${text}"`;
+
+    const config = await loadConfig();
+    const provider = config.settings?.ai_provider || 'openai';
+
+    let response;
+    if (provider === 'openai') {
+      response = await callOpenAI(prompt);
+    } else {
+      response = await callAnthropic(prompt);
+    }
+
+    // Update user AI usage
+    const users = await loadUsers();
+    const user = users.find(u => u.id === req.user.userId);
+    if (user) {
+      user.aiUsageCount = (user.aiUsageCount || 0) + 1;
+      await saveUsers(users);
+    }
+
+    await logAIUsage(req.user.userId, req.user.username, 'analyze', { 
+      provider,
+      analysisType: analysisType || 'general',
+      textLength: text.length
+    });
+
+    res.json({
+      success: true,
+      analysis: response,
+      type: analysisType,
+      provider: provider,
+      remaining: rateLimit.remaining
+    });
+  } catch(err) {
+    console.error('AI Analyze error:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: err.message || 'AI service error' 
+    });
+  }
+});
+
+// Get AI Usage Stats
+app.get('/api/ai/stats', requireAuth, requirePremium, async (req, res) => {
+  try {
+    const users = await loadUsers();
+    const user = users.find(u => u.id === req.user.userId);
+    
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const rateLimit = aiRateLimits.get(req.user.userId);
+    const dailyUsed = rateLimit ? rateLimit.count : 0;
+    const dailyRemaining = AI_DAILY_LIMIT_PREMIUM - dailyUsed;
+
+    res.json({
+      success: true,
+      stats: {
+        totalAIUsage: user.aiUsageCount || 0,
+        dailyLimit: AI_DAILY_LIMIT_PREMIUM,
+        dailyUsed: dailyUsed,
+        dailyRemaining: dailyRemaining,
+        resetAt: rateLimit ? new Date(rateLimit.resetAt).toISOString() : null
+      }
+    });
+  } catch(err) {
+    console.error('AI Stats error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+/* ================= ADMIN: AI LOGS ================= */
+app.get('/api/admin/ai-logs', requireAdmin, async (req, res) => {
+  try {
+    const logs = await loadAILogs();
+    const limit = parseInt(req.query.limit) || 100;
+    res.json(logs.slice(-limit).reverse());
+  } catch(err) {
+    console.error('Get AI logs error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+/* ================= REST OF ENDPOINTS (SAME AS BEFORE) ================= */
+// ... [Keep all other endpoints from original file: create-key, list-keys, verify-key, etc.]
+
+/* ================= CREATE KEY ================= */
 app.post('/api/create-key', requireAuth, async (req, res) => {
   try {
     const { days, devices, type, customKey } = req.body || {};
@@ -741,7 +1195,6 @@ app.post('/api/create-key', requireAuth, async (req, res) => {
         });
       }
 
-      // Custom key chỉ dành cho Premium
       if (customKey && !user.isPremium) {
         return res.status(403).json({ 
           success: false, 
@@ -752,7 +1205,6 @@ app.post('/api/create-key', requireAuth, async (req, res) => {
 
     let keyCode;
     
-    // Custom key logic
     if (customKey && customKey.trim()) {
       keyCode = customKey.trim();
       const keys = await loadKeys();
@@ -812,7 +1264,6 @@ app.post('/api/create-key', requireAuth, async (req, res) => {
   }
 });
 
-/* ================= BULK CREATE KEYS (ADMIN + VIP) ================= */
 app.post('/api/bulk-create-keys', requireAuth, async (req, res) => {
   try {
     const { count, days, devices, type } = req.body || {};
@@ -827,7 +1278,6 @@ app.post('/api/bulk-create-keys', requireAuth, async (req, res) => {
     const users = await loadUsers();
     const user = users.find(u => u.id === req.user.userId);
 
-    // Allow both ADMIN and PREMIUM users
     if (req.user.role !== 'admin') {
       if (!user || !user.isPremium) {
         return res.status(403).json({ 
@@ -896,7 +1346,6 @@ app.post('/api/bulk-create-keys', requireAuth, async (req, res) => {
   }
 });
 
-/* ================= LIST USER KEYS ================= */
 app.get('/api/my-keys', requireAuth, async (req, res) => {
   try {
     const keys = await loadKeys();
@@ -908,7 +1357,6 @@ app.get('/api/my-keys', requireAuth, async (req, res) => {
   }
 });
 
-/* ================= LIST ALL KEYS (ADMIN) ================= */
 app.get('/api/list-keys', requireAdmin, async (req, res) => {
   try {
     res.json(await loadKeys());
@@ -918,7 +1366,6 @@ app.get('/api/list-keys', requireAdmin, async (req, res) => {
   }
 });
 
-/* ================= USER STATS ================= */
 app.get('/api/my-stats', requireAuth, async (req, res) => {
   try {
     const users = await loadUsers();
@@ -941,7 +1388,9 @@ app.get('/api/my-stats', requireAuth, async (req, res) => {
       keysRemaining: user.isPremium ? 'Không giới hạn' : Math.max(0, FREE_KEY_LIMIT - user.keyCount),
       apiCode: user.apiCode,
       totalKeysCreated: user.totalKeysCreated || 0,
-      totalVerifications: user.totalVerifications || 0
+      totalVerifications: user.totalVerifications || 0,
+      aiAccess: user.isPremium,
+      aiUsageCount: user.aiUsageCount || 0
     };
 
     res.json(stats);
@@ -951,7 +1400,6 @@ app.get('/api/my-stats', requireAuth, async (req, res) => {
   }
 });
 
-/* ================= GET API CODE ================= */
 app.get('/api/my-api-code', requireAuth, async (req, res) => {
   try {
     const users = await loadUsers();
@@ -974,7 +1422,6 @@ app.get('/api/my-api-code', requireAuth, async (req, res) => {
   }
 });
 
-/* ================= RESET API CODE ================= */
 app.post('/api/reset-api-code', requireAuth, async (req, res) => {
   try {
     const users = await loadUsers();
@@ -1003,7 +1450,6 @@ app.post('/api/reset-api-code', requireAuth, async (req, res) => {
   }
 });
 
-/* ================= EXTEND KEY ================= */
 app.post('/api/extend-key', requireAuth, async (req, res) => {
   try {
     const { key, days } = req.body || {};
@@ -1033,7 +1479,6 @@ app.post('/api/extend-key', requireAuth, async (req, res) => {
   }
 });
 
-/* ================= RESET KEY ================= */
 app.post('/api/reset-key', requireAuth, async (req, res) => {
   try {
     const { key } = req.body || {};
@@ -1064,7 +1509,6 @@ app.post('/api/reset-key', requireAuth, async (req, res) => {
   }
 });
 
-/* ================= DELETE KEY ================= */
 app.post('/api/delete-key', requireAuth, async (req, res) => {
   try {
     const { key } = req.body || {};
@@ -1100,7 +1544,6 @@ app.post('/api/delete-key', requireAuth, async (req, res) => {
   }
 });
 
-/* ================= VERIFY KEY (PUBLIC) ================= */
 app.post('/api/verify-key', async (req, res) => {
   try {
     const { key, device_id, api_code } = req.body || {};
@@ -1124,7 +1567,6 @@ app.post('/api/verify-key', async (req, res) => {
       });
     }
 
-    // API Code check for free users
     if (found.require_api_key) {
       if (!api_code) {
         return res.status(401).json({ 
@@ -1162,12 +1604,10 @@ app.post('/api/verify-key', async (req, res) => {
         });
       }
 
-      // Update user verification count
       keyOwner.totalVerifications = (keyOwner.totalVerifications || 0) + 1;
       await saveUsers(users);
     }
 
-    // Verify signature
     const expectedSig = signValue(found.key_code);
     if (expectedSig !== found.signature) {
       return res.status(500).json({ 
@@ -1177,7 +1617,6 @@ app.post('/api/verify-key', async (req, res) => {
       });
     }
 
-    // Check expiry
     if (new Date(found.expires_at) < new Date()) {
       return res.json({ 
         success: false, 
@@ -1187,7 +1626,6 @@ app.post('/api/verify-key', async (req, res) => {
       });
     }
 
-    // Check device limit
     if (!found.devices.includes(device_id)) {
       if (found.devices.length >= found.allowed_devices) {
         return res.json({ 
@@ -1202,7 +1640,6 @@ app.post('/api/verify-key', async (req, res) => {
       found.devices.push(device_id);
     }
 
-    // Update verification stats
     found.total_verifications = (found.total_verifications || 0) + 1;
     found.last_verified = new Date().toISOString();
     await saveKeys(keys);
@@ -1225,7 +1662,6 @@ app.post('/api/verify-key', async (req, res) => {
   }
 });
 
-/* ================= KEY INFO ================= */
 app.post('/api/key-info', async (req, res) => {
   try {
     const { key } = req.body || {};
@@ -1268,7 +1704,7 @@ app.post('/api/key-info', async (req, res) => {
   }
 });
 
-/* ================= ADMIN: USER MANAGEMENT ================= */
+/* ================= ADMIN USER MANAGEMENT ================= */
 app.get('/api/admin/users', requireAdmin, async (req, res) => {
   try {
     const users = await loadUsers();
@@ -1286,7 +1722,8 @@ app.get('/api/admin/users', requireAdmin, async (req, res) => {
       apiCode: u.apiCode,
       deviceId: u.deviceId,
       totalKeysCreated: u.totalKeysCreated || 0,
-      totalVerifications: u.totalVerifications || 0
+      totalVerifications: u.totalVerifications || 0,
+      aiUsageCount: u.aiUsageCount || 0
     }));
     res.json(sanitizedUsers);
   } catch(err) {
@@ -1456,7 +1893,6 @@ app.post('/api/admin/delete-user', requireAdmin, async (req, res) => {
   }
 });
 
-/* ================= ADMIN: SETTINGS ================= */
 app.get('/api/admin/settings', requireAdmin, async (req, res) => {
   try {
     const config = await loadConfig();
@@ -1482,7 +1918,6 @@ app.post('/api/admin/settings', requireAdmin, async (req, res) => {
   }
 });
 
-/* ================= ADMIN: LOGS ================= */
 app.get('/api/admin/logs', requireAdmin, async (req, res) => {
   try {
     const logs = await loadLogs();
@@ -1494,7 +1929,6 @@ app.get('/api/admin/logs', requireAdmin, async (req, res) => {
   }
 });
 
-/* ================= ADMIN: BACKUP ================= */
 app.post('/api/admin/backup', requireAdmin, async (req, res) => {
   try {
     await createBackup();
@@ -1526,12 +1960,12 @@ app.get('/api/admin/backups', requireAdmin, async (req, res) => {
   }
 });
 
-/* ================= ADMIN: STATS ================= */
 app.get('/api/admin/stats', requireAdmin, async (req, res) => {
   try {
     const users = await loadUsers();
     const keys = await loadKeys();
     const devices = await loadDevices();
+    const aiLogs = await loadAILogs();
     const now = new Date();
 
     const stats = {
@@ -1544,7 +1978,13 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
       expiredKeys: keys.filter(k => new Date(k.expires_at) <= now).length,
       protectedKeys: keys.filter(k => k.require_api_key).length,
       totalDevices: devices.length,
-      totalVerifications: keys.reduce((sum, k) => sum + (k.total_verifications || 0), 0)
+      totalVerifications: keys.reduce((sum, k) => sum + (k.total_verifications || 0), 0),
+      totalAIRequests: aiLogs.length,
+      aiRequestsToday: aiLogs.filter(log => {
+        const logDate = new Date(log.timestamp);
+        const today = new Date();
+        return logDate.toDateString() === today.toDateString();
+      }).length
     };
 
     res.json(stats);
@@ -1554,7 +1994,6 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
   }
 });
 
-/* ================= CONTACT INFO ================= */
 app.get('/api/contact', async (req, res) => {
   try {
     const cfg = await loadConfig();
@@ -1565,7 +2004,6 @@ app.get('/api/contact', async (req, res) => {
   }
 });
 
-/* ================= ROOT & API INFO ================= */
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -1573,8 +2011,8 @@ app.get('/', (req, res) => {
 app.get('/api', async (req, res) => {
   const config = await loadConfig();
   res.json({
-    name: "AuthAPI v3.4 ULTIMATE - Anti-Crash Edition",
-    version: "3.4.0",
+    name: "AuthAPI v3.5 ULTIMATE - Anti-Crash + AI Features",
+    version: "3.5.0",
     status: "online",
     maintenance_mode: config.settings?.maintenance_mode || false,
     features: [
@@ -1586,6 +2024,10 @@ app.get('/api', async (req, res) => {
       "⭐ Premium users bypass API Code",
       "💎 Custom key creation (Premium only)",
       "📦 Bulk key creation (Admin + Premium)",
+      "🤖 AI Chat (Premium only - 100 req/day)",
+      "🎨 AI Image Generation (Premium only)",
+      "💻 AI Code Helper (Premium only)",
+      "📊 AI Text Analysis (Premium only)",
       "💾 Auto backup every 6 hours",
       "📊 Activity logging system",
       "🔄 API Code reset",
@@ -1599,11 +2041,24 @@ app.get('/api', async (req, res) => {
       "⚙️ System settings management",
       "🔧 Maintenance mode support"
     ],
+    ai_features: {
+      access: "Premium users only",
+      daily_limit: AI_DAILY_LIMIT_PREMIUM,
+      rate_limit: `${AI_RATE_LIMIT_MS/1000} seconds between requests`,
+      endpoints: [
+        "/api/ai/chat - AI conversation",
+        "/api/ai/image - Generate images",
+        "/api/ai/code - Code assistance",
+        "/api/ai/analyze - Text analysis",
+        "/api/ai/stats - Usage statistics"
+      ],
+      providers: ["OpenAI (GPT, DALL-E)", "Anthropic (Claude)"]
+    },
     security: {
       email_verification: "DISABLED - Accept any email, allow duplicates",
       device_limit: "3 accounts per device (UserAgent + IP hash)",
       free_users: "MUST provide api_code when verifying keys",
-      premium_users: "Can verify without api_code + bulk create keys",
+      premium_users: "Can verify without api_code + AI access + bulk create keys",
       admin_keys: "Never require api_code"
     },
     key_prefixes: {
@@ -1614,7 +2069,6 @@ app.get('/api', async (req, res) => {
   });
 });
 
-/* ================= HEALTH CHECK ================= */
 app.get('/health', async (req, res) => {
   const used = process.memoryUsage();
   res.json({
@@ -1629,7 +2083,6 @@ app.get('/health', async (req, res) => {
   });
 });
 
-/* ================= 404 HANDLER ================= */
 app.use((req, res) => {
   res.status(404).json({
     success: false,
@@ -1646,7 +2099,7 @@ async function startServer() {
     
     const server = app.listen(PORT, () => {
       console.log('╔═══════════════════════════════════════════════════╗');
-      console.log('║   AuthAPI v3.4 ULTIMATE - Anti-Crash Edition     ║');
+      console.log('║   AuthAPI v3.5 ULTIMATE - AI Edition             ║');
       console.log('╚═══════════════════════════════════════════════════╝');
       console.log(`✅ Server: http://localhost:${PORT}`);
       console.log('📧 Same email: Multiple accounts allowed');
@@ -1654,19 +2107,21 @@ async function startServer() {
       console.log('🔑 Free: 10 keys | Premium: Unlimited');
       console.log('💎 Custom keys: Premium only');
       console.log('📦 Bulk create: Admin + Premium (1-100 keys)');
+      console.log('🤖 AI Features: Premium only (100 req/day)');
+      console.log('  ├─ AI Chat (GPT/Claude)');
+      console.log('  ├─ AI Image (DALL-E)');
+      console.log('  ├─ AI Code Helper');
+      console.log('  └─ AI Text Analysis');
       console.log('💾 Auto backup: Every 6 hours');
       console.log('📊 Activity logs: Last 1000 actions');
       console.log('🔒 API Code required for FREE users');
-      console.log('⭐ Premium users: No API Code needed + Bulk create');
+      console.log('⭐ Premium: No API Code + AI + Bulk create');
       console.log('🛡️ Anti-crash: File locking + Retry + Memory monitor');
-      console.log('🔑 Key types: KEY-*, VIP-* (old ZXS->KEY, BRUTAL->VIP)');
       console.log('═══════════════════════════════════════════════════');
       
-      // Create initial backup
       createBackup().catch(err => console.error('Initial backup failed:', err));
     });
 
-    /* ================= GRACEFUL SHUTDOWN ================= */
     const gracefulShutdown = async (signal) => {
       console.log(`\n${signal} received...`);
       console.log('Creating final backup...');
@@ -1677,7 +2132,6 @@ async function startServer() {
         process.exit(0);
       });
 
-      // Force close after 10 seconds
       setTimeout(() => {
         console.error('Forced shutdown after timeout');
         process.exit(1);
