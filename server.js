@@ -29,7 +29,7 @@ const HMAC_SECRET = process.env.HMAC_SECRET || 'please-change-hmac-secret-2025';
 
 // AI API Keys (set in environment variables)
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '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';
 
 const FREE_KEY_LIMIT = 10;
 const MAX_ACCOUNTS_PER_DEVICE = 3;
