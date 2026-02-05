@@ -1,8 +1,9 @@
-// server.js - AuthAPI v3.3 ULTIMATE - No Email Validation
+// server.js - AuthAPI v3.4 ULTIMATE - Anti-Crash + VIP Features
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const fs = require('fs');
+const fs = require('fs').promises;
+const fsSync = require('fs');
 const path = require('path');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
@@ -11,13 +12,67 @@ const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 
+/* ================= CONSTANTS ================= */
+const PORT = process.env.PORT || 10000;
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+const DATA_FILE = path.join(DATA_DIR, 'keys.json');
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+const DEVICES_FILE = path.join(DATA_DIR, 'devices.json');
+const LOGS_FILE = path.join(DATA_DIR, 'activity_logs.json');
+const BACKUP_DIR = path.join(DATA_DIR, 'backups');
+const LOCK_DIR = path.join(DATA_DIR, 'locks');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'please-change-jwt-secret-2025';
+const HMAC_SECRET = process.env.HMAC_SECRET || 'please-change-hmac-secret-2025';
+
+const FREE_KEY_LIMIT = 10;
+const MAX_ACCOUNTS_PER_DEVICE = 3;
+const MAX_MEMORY_MB = 450; // Alert if > 450MB
+const MAX_LOGS = 1000;
+const LOCK_TIMEOUT = 5000; // 5 seconds
+const MAX_RETRY = 3;
+
+/* ================= MEMORY MONITORING ================= */
+let memoryWarningCount = 0;
+
+function monitorMemory() {
+  const used = process.memoryUsage();
+  const usedMB = Math.round(used.heapUsed / 1024 / 1024);
+  
+  if (usedMB > MAX_MEMORY_MB) {
+    memoryWarningCount++;
+    console.warn(`⚠️ HIGH MEMORY: ${usedMB}MB (Warning #${memoryWarningCount})`);
+    
+    if (memoryWarningCount > 5) {
+      console.error('❌ CRITICAL MEMORY - Forcing GC');
+      if (global.gc) {
+        global.gc();
+        memoryWarningCount = 0;
+      }
+    }
+  } else {
+    memoryWarningCount = 0;
+  }
+}
+
+setInterval(monitorMemory, 30000); // Check every 30s
+
 /* ================= ERROR HANDLING ================= */
 process.on('uncaughtException', (err) => {
   console.error('❌ UNCAUGHT EXCEPTION:', err);
+  console.error('Stack:', err.stack);
+  // Don't exit - log and continue
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('❌ UNHANDLED REJECTION:', reason);
+  console.error('Promise:', promise);
+});
+
+process.on('warning', (warning) => {
+  console.warn('⚠️ Warning:', warning.name);
+  console.warn('Message:', warning.message);
 });
 
 app.use((err, req, res, next) => {
@@ -31,206 +86,340 @@ app.use((err, req, res, next) => {
 
 /* ================= MIDDLEWARE ================= */
 app.use(cors());
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: '10mb' }));
 app.use(express.static('public'));
 
-// Request logging
+// Request logging with timeout
 app.use((req, res, next) => {
+  const startTime = Date.now();
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  
+  res.on('finish', () => {
+    const duration = Date.now() - startTime;
+    if (duration > 1000) {
+      console.warn(`⚠️ Slow request: ${req.method} ${req.path} - ${duration}ms`);
+    }
+  });
+  
   next();
 });
 
-/* ================= CONSTANTS ================= */
-const PORT = process.env.PORT || 10000;
-const DATA_DIR = process.env.DATA_DIR || __dirname;
-const DATA_FILE = path.join(DATA_DIR, 'keys.json');
-const USERS_FILE = path.join(DATA_DIR, 'users.json');
-const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
-const DEVICES_FILE = path.join(DATA_DIR, 'devices.json');
-const LOGS_FILE = path.join(DATA_DIR, 'activity_logs.json');
-const BACKUP_DIR = path.join(DATA_DIR, 'backups');
+// Request timeout
+app.use((req, res, next) => {
+  req.setTimeout(10000); // 10 seconds
+  next();
+});
 
-const JWT_SECRET = process.env.JWT_SECRET || 'please-change-jwt-secret-2025';
-const HMAC_SECRET = process.env.HMAC_SECRET || 'please-change-hmac-secret-2025';
+/* ================= FILE LOCKING SYSTEM ================= */
+class FileLock {
+  constructor() {
+    this.locks = new Map();
+    if (!fsSync.existsSync(LOCK_DIR)) {
+      fsSync.mkdirSync(LOCK_DIR, { recursive: true });
+    }
+  }
 
-const FREE_KEY_LIMIT = 10;
-const MAX_ACCOUNTS_PER_DEVICE = 3;
+  async acquire(filename) {
+    const lockFile = path.join(LOCK_DIR, `${filename}.lock`);
+    const startTime = Date.now();
+    
+    while (true) {
+      try {
+        // Try to create lock file exclusively
+        await fs.writeFile(lockFile, process.pid.toString(), { flag: 'wx' });
+        this.locks.set(filename, lockFile);
+        return true;
+      } catch (err) {
+        if (err.code !== 'EEXIST') {
+          throw err;
+        }
+        
+        // Check if lock is stale
+        try {
+          const stats = await fs.stat(lockFile);
+          const lockAge = Date.now() - stats.mtimeMs;
+          
+          if (lockAge > LOCK_TIMEOUT) {
+            console.warn(`⚠️ Removing stale lock: ${filename}`);
+            await fs.unlink(lockFile).catch(() => {});
+            continue;
+          }
+        } catch (statErr) {
+          // Lock file disappeared, try again
+          continue;
+        }
+        
+        // Check timeout
+        if (Date.now() - startTime > LOCK_TIMEOUT) {
+          throw new Error(`Lock timeout for ${filename}`);
+        }
+        
+        // Wait and retry
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    }
+  }
 
-/* ================= BACKUP SYSTEM ================= */
-if (!fs.existsSync(BACKUP_DIR)) {
-  fs.mkdirSync(BACKUP_DIR, { recursive: true });
-  console.log('✅ Created backup directory');
+  async release(filename) {
+    const lockFile = this.locks.get(filename);
+    if (lockFile) {
+      try {
+        await fs.unlink(lockFile);
+      } catch (err) {
+        console.error(`Error releasing lock for ${filename}:`, err);
+      }
+      this.locks.delete(filename);
+    }
+  }
 }
 
-function createBackup() {
+const fileLock = new FileLock();
+
+/* ================= BACKUP SYSTEM ================= */
+async function ensureBackupDir() {
   try {
+    await fs.access(BACKUP_DIR);
+  } catch {
+    await fs.mkdir(BACKUP_DIR, { recursive: true });
+    console.log('✅ Created backup directory');
+  }
+}
+
+async function createBackup() {
+  try {
+    await ensureBackupDir();
+    
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const backupSubDir = path.join(BACKUP_DIR, timestamp);
     
-    if (!fs.existsSync(backupSubDir)) {
-      fs.mkdirSync(backupSubDir, { recursive: true });
-    }
+    await fs.mkdir(backupSubDir, { recursive: true });
 
     const filesToBackup = [DATA_FILE, USERS_FILE, CONFIG_FILE, DEVICES_FILE, LOGS_FILE];
     
-    filesToBackup.forEach(file => {
-      if (fs.existsSync(file)) {
+    for (const file of filesToBackup) {
+      try {
+        await fs.access(file);
         const filename = path.basename(file);
         const backupPath = path.join(backupSubDir, filename);
-        fs.copyFileSync(file, backupPath);
+        await fs.copyFile(file, backupPath);
+      } catch (err) {
+        // File doesn't exist, skip
       }
-    });
+    }
 
     console.log(`✅ Backup created: ${timestamp}`);
-    cleanOldBackups();
+    await cleanOldBackups();
   } catch(err) {
     console.error('❌ Backup error:', err);
   }
 }
 
-function cleanOldBackups() {
+async function cleanOldBackups() {
   try {
-    const backups = fs.readdirSync(BACKUP_DIR);
-    const now = new Date();
+    const backups = await fs.readdir(BACKUP_DIR);
+    const now = Date.now();
     
-    backups.forEach(backup => {
+    for (const backup of backups) {
       const backupPath = path.join(BACKUP_DIR, backup);
-      const stats = fs.statSync(backupPath);
-      const daysDiff = (now - stats.mtime) / (1000 * 60 * 60 * 24);
-      
-      if (daysDiff > 7) {
-        fs.rmSync(backupPath, { recursive: true, force: true });
-        console.log(`🗑️ Deleted old backup: ${backup}`);
+      try {
+        const stats = await fs.stat(backupPath);
+        const daysDiff = (now - stats.mtimeMs) / (1000 * 60 * 60 * 24);
+        
+        if (daysDiff > 7) {
+          await fs.rm(backupPath, { recursive: true, force: true });
+          console.log(`🗑️ Deleted old backup: ${backup}`);
+        }
+      } catch (err) {
+        console.error(`Error processing backup ${backup}:`, err);
       }
-    });
+    }
   } catch(err) {
     console.error('❌ Clean backup error:', err);
   }
 }
 
 // Auto backup every 6 hours
-setInterval(createBackup, 6 * 60 * 60 * 1000);
+setInterval(() => {
+  createBackup().catch(err => console.error('Scheduled backup failed:', err));
+}, 6 * 60 * 60 * 1000);
 
-/* ================= SAFE FILE OPERATIONS ================= */
-function safeLoadJSON(file, defaultValue = []) {
-  try {
-    if (fs.existsSync(file)) {
-      const data = fs.readFileSync(file, 'utf8');
+/* ================= SAFE FILE OPERATIONS WITH RETRY ================= */
+async function safeLoadJSON(file, defaultValue = []) {
+  for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
+    try {
+      await fs.access(file);
+      const data = await fs.readFile(file, 'utf8');
+      
+      if (!data || data.trim() === '') {
+        console.warn(`⚠️ Empty file: ${file}, using default`);
+        return defaultValue;
+      }
+      
       return JSON.parse(data);
+    } catch(err) {
+      if (err.code === 'ENOENT') {
+        return defaultValue;
+      }
+      
+      console.error(`❌ Error loading ${file} (attempt ${attempt}/${MAX_RETRY}):`, err.message);
+      
+      if (attempt < MAX_RETRY) {
+        await new Promise(resolve => setTimeout(resolve, 100 * attempt));
+      } else {
+        console.error(`❌ Failed to load ${file} after ${MAX_RETRY} attempts`);
+        return defaultValue;
+      }
     }
-    return defaultValue;
-  } catch(err) {
-    console.error(`❌ Error loading ${file}:`, err);
-    return defaultValue;
   }
+  return defaultValue;
 }
 
-function safeSaveJSON(file, data) {
-  try {
-    const tempFile = file + '.tmp';
-    fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), 'utf8');
-    fs.renameSync(tempFile, file);
-    return true;
-  } catch(err) {
-    console.error(`❌ Error saving ${file}:`, err);
-    return false;
+async function safeSaveJSON(file, data) {
+  const filename = path.basename(file);
+  
+  for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
+    try {
+      await fileLock.acquire(filename);
+      
+      // Check disk space (basic check)
+      const tempFile = file + '.tmp';
+      const jsonStr = JSON.stringify(data, null, 2);
+      
+      // Write to temp file first
+      await fs.writeFile(tempFile, jsonStr, 'utf8');
+      
+      // Verify temp file
+      const tempData = await fs.readFile(tempFile, 'utf8');
+      JSON.parse(tempData); // Verify it's valid JSON
+      
+      // Atomic rename
+      await fs.rename(tempFile, file);
+      
+      await fileLock.release(filename);
+      return true;
+    } catch(err) {
+      await fileLock.release(filename);
+      console.error(`❌ Error saving ${file} (attempt ${attempt}/${MAX_RETRY}):`, err.message);
+      
+      if (attempt < MAX_RETRY) {
+        await new Promise(resolve => setTimeout(resolve, 100 * attempt));
+      } else {
+        console.error(`❌ Failed to save ${file} after ${MAX_RETRY} attempts`);
+        return false;
+      }
+    }
   }
+  return false;
 }
 
 /* ================= INIT FILES ================= */
-if (!fs.existsSync(DATA_FILE)) {
-  safeSaveJSON(DATA_FILE, []);
-  console.log('✅ Initialized keys.json');
-}
-
-if (!fs.existsSync(USERS_FILE)) {
-  safeSaveJSON(USERS_FILE, []);
-  console.log('✅ Initialized users.json');
-}
-
-if (!fs.existsSync(DEVICES_FILE)) {
-  safeSaveJSON(DEVICES_FILE, []);
-  console.log('✅ Initialized devices.json');
-}
-
-if (!fs.existsSync(LOGS_FILE)) {
-  safeSaveJSON(LOGS_FILE, []);
-  console.log('✅ Initialized activity_logs.json');
-}
-
-if (!fs.existsSync(CONFIG_FILE)) {
-  const adminPassword = process.env.ADMIN_PASSWORD || '1';
-  const hash = bcrypt.hashSync(adminPassword, 10);
-  const cfg = {
-    admin: {
-      username: 'admin',
-      passwordHash: hash
-    },
-    contact: {
-      admin_profile: 'https://www.facebook.com/duc.pham.396384',
-      telegram: '@phamcduc0',
-      email: 'monhpham15@gmail.com'
-    },
-    settings: {
-      maintenance_mode: false,
-      registration_enabled: true,
-      max_key_days: 365,
-      enable_email_verification: false
+async function initializeFiles() {
+  try {
+    // Ensure data directory exists
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    
+    if (!fsSync.existsSync(DATA_FILE)) {
+      await safeSaveJSON(DATA_FILE, []);
+      console.log('✅ Initialized keys.json');
     }
-  };
-  safeSaveJSON(CONFIG_FILE, cfg);
-  console.log('✅ Initialized config.json');
+
+    if (!fsSync.existsSync(USERS_FILE)) {
+      await safeSaveJSON(USERS_FILE, []);
+      console.log('✅ Initialized users.json');
+    }
+
+    if (!fsSync.existsSync(DEVICES_FILE)) {
+      await safeSaveJSON(DEVICES_FILE, []);
+      console.log('✅ Initialized devices.json');
+    }
+
+    if (!fsSync.existsSync(LOGS_FILE)) {
+      await safeSaveJSON(LOGS_FILE, []);
+      console.log('✅ Initialized activity_logs.json');
+    }
+
+    if (!fsSync.existsSync(CONFIG_FILE)) {
+      const adminPassword = process.env.ADMIN_PASSWORD || '1';
+      const hash = await bcrypt.hash(adminPassword, 10);
+      const cfg = {
+        admin: {
+          username: 'admin',
+          passwordHash: hash
+        },
+        contact: {
+          admin_profile: 'https://www.facebook.com/duc.pham.396384',
+          telegram: '@phamcduc0',
+          email: 'monhpham15@gmail.com'
+        },
+        settings: {
+          maintenance_mode: false,
+          registration_enabled: true,
+          max_key_days: 365,
+          enable_email_verification: false
+        }
+      };
+      await safeSaveJSON(CONFIG_FILE, cfg);
+      console.log('✅ Initialized config.json');
+    }
+  } catch (err) {
+    console.error('❌ Initialization error:', err);
+    throw err;
+  }
 }
 
 /* ================= HELPERS ================= */
-function loadKeys() {
-  return safeLoadJSON(DATA_FILE, []);
+async function loadKeys() {
+  return await safeLoadJSON(DATA_FILE, []);
 }
 
-function saveKeys(keys) {
-  return safeSaveJSON(DATA_FILE, keys);
+async function saveKeys(keys) {
+  return await safeSaveJSON(DATA_FILE, keys);
 }
 
-function loadUsers() {
-  return safeLoadJSON(USERS_FILE, []);
+async function loadUsers() {
+  return await safeLoadJSON(USERS_FILE, []);
 }
 
-function saveUsers(users) {
-  return safeSaveJSON(USERS_FILE, users);
+async function saveUsers(users) {
+  return await safeSaveJSON(USERS_FILE, users);
 }
 
-function loadDevices() {
-  return safeLoadJSON(DEVICES_FILE, []);
+async function loadDevices() {
+  return await safeLoadJSON(DEVICES_FILE, []);
 }
 
-function saveDevices(devices) {
-  return safeSaveJSON(DEVICES_FILE, devices);
+async function saveDevices(devices) {
+  return await safeSaveJSON(DEVICES_FILE, devices);
 }
 
-function loadConfig() {
-  return safeLoadJSON(CONFIG_FILE, {
+async function loadConfig() {
+  return await safeLoadJSON(CONFIG_FILE, {
     admin: { username: 'admin', passwordHash: '' },
     contact: {},
     settings: {}
   });
 }
 
-function saveConfig(config) {
-  return safeSaveJSON(CONFIG_FILE, config);
+async function saveConfig(config) {
+  return await safeSaveJSON(CONFIG_FILE, config);
 }
 
-function loadLogs() {
-  return safeLoadJSON(LOGS_FILE, []);
+async function loadLogs() {
+  return await safeLoadJSON(LOGS_FILE, []);
 }
 
-function saveLogs(logs) {
-  return safeSaveJSON(LOGS_FILE, logs);
+async function saveLogs(logs) {
+  // Keep only last MAX_LOGS entries
+  if (logs.length > MAX_LOGS) {
+    logs = logs.slice(-MAX_LOGS);
+  }
+  return await safeSaveJSON(LOGS_FILE, logs);
 }
 
 /* ================= ACTIVITY LOGGING ================= */
-function logActivity(action, userId, username, details = {}) {
+async function logActivity(action, userId, username, details = {}) {
   try {
-    const logs = loadLogs();
+    const logs = await loadLogs();
     const log = {
       id: uuidv4(),
       action,
@@ -242,13 +431,7 @@ function logActivity(action, userId, username, details = {}) {
     };
     
     logs.push(log);
-    
-    // Keep only last 1000 logs
-    if (logs.length > 1000) {
-      logs.splice(0, logs.length - 1000);
-    }
-    
-    saveLogs(logs);
+    await saveLogs(logs);
   } catch(err) {
     console.error('❌ Log error:', err);
   }
@@ -259,7 +442,7 @@ function signValue(val) {
 }
 
 function randomChunk(len) {
-  return Math.random().toString(36).substring(2, 2 + len).toUpperCase();
+  return crypto.randomBytes(Math.ceil(len / 2)).toString('hex').substring(0, len).toUpperCase();
 }
 
 function generateKey(type = "KEY") {
@@ -317,8 +500,8 @@ function requireAuth(req, res, next) {
 }
 
 /* ================= MAINTENANCE MODE ================= */
-function checkMaintenance(req, res, next) {
-  const config = loadConfig();
+async function checkMaintenance(req, res, next) {
+  const config = await loadConfig();
   if (config.settings?.maintenance_mode && !req.path.includes('/admin')) {
     return res.status(503).json({
       success: false,
@@ -335,7 +518,7 @@ app.use(checkMaintenance);
 app.post('/api/admin-login', async (req, res) => {
   try {
     const { username, password } = req.body || {};
-    const cfg = loadConfig();
+    const cfg = await loadConfig();
 
     if (username !== cfg.admin.username) {
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
@@ -352,7 +535,7 @@ app.post('/api/admin-login', async (req, res) => {
       { expiresIn: '12h' }
     );
 
-    logActivity('admin_login', 'admin', 'admin', { ip: req.ip });
+    await logActivity('admin_login', 'admin', 'admin', { ip: req.ip });
 
     res.json({ success: true, token, role: 'admin' });
   } catch(err) {
@@ -361,12 +544,12 @@ app.post('/api/admin-login', async (req, res) => {
   }
 });
 
-/* ================= USER REGISTRATION (NO EMAIL VALIDATION) ================= */
+/* ================= USER REGISTRATION ================= */
 app.post('/api/register', async (req, res) => {
   try {
     const { username, password, email } = req.body || {};
     
-    const config = loadConfig();
+    const config = await loadConfig();
     if (!config.settings?.registration_enabled) {
       return res.status(403).json({ 
         success: false, 
@@ -374,7 +557,6 @@ app.post('/api/register', async (req, res) => {
       });
     }
 
-    // Kiểm tra đầu vào cơ bản - email có thể là bất kỳ
     if (!username || !password || !email) {
       return res.status(400).json({ success: false, message: 'Vui lòng điền đầy đủ thông tin' });
     }
@@ -386,11 +568,8 @@ app.post('/api/register', async (req, res) => {
       });
     }
 
-    // Không kiểm tra định dạng email - cho phép nhập bất kỳ
-    // Email chỉ cần có giá trị, không cần hợp lệ
-
     const deviceId = generateDeviceId(req);
-    const devices = loadDevices();
+    const devices = await loadDevices();
     const deviceRecord = devices.find(d => d.device_id === deviceId);
     
     if (deviceRecord && deviceRecord.accounts.length >= MAX_ACCOUNTS_PER_DEVICE) {
@@ -400,13 +579,11 @@ app.post('/api/register', async (req, res) => {
       });
     }
 
-    const users = loadUsers();
+    const users = await loadUsers();
     
     if (users.find(u => u.username === username)) {
       return res.status(400).json({ success: false, message: 'Tên đăng nhập đã tồn tại' });
     }
-    
-    // ĐÃ BỎ: Không kiểm tra email trùng - cho phép nhiều acc cùng 1 email
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const apiCode = generateAPICode();
@@ -414,7 +591,7 @@ app.post('/api/register', async (req, res) => {
     const newUser = {
       id: uuidv4(),
       username,
-      email, // Lưu email bất kỳ mà không xác thực
+      email,
       passwordHash: hashedPassword,
       role: 'user',
       isPremium: false,
@@ -427,11 +604,11 @@ app.post('/api/register', async (req, res) => {
       deviceId: deviceId,
       totalKeysCreated: 0,
       totalVerifications: 0,
-      emailVerified: false // Đánh dấu là chưa xác thực (optional)
+      emailVerified: false
     };
 
     users.push(newUser);
-    saveUsers(users);
+    await saveUsers(users);
 
     if (deviceRecord) {
       deviceRecord.accounts.push(newUser.id);
@@ -442,9 +619,9 @@ app.post('/api/register', async (req, res) => {
         created_at: new Date().toISOString()
       });
     }
-    saveDevices(devices);
+    await saveDevices(devices);
 
-    logActivity('register', newUser.id, username, { email, ip: req.ip });
+    await logActivity('register', newUser.id, username, { email, ip: req.ip });
 
     res.json({ 
       success: true, 
@@ -466,7 +643,7 @@ app.post('/api/login', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Vui lòng nhập đầy đủ thông tin' });
     }
 
-    const users = loadUsers();
+    const users = await loadUsers();
     const user = users.find(u => u.username === username);
 
     if (!user) {
@@ -493,7 +670,7 @@ app.post('/api/login', async (req, res) => {
     }
 
     user.lastLogin = new Date().toISOString();
-    saveUsers(users);
+    await saveUsers(users);
 
     const token = jwt.sign(
       { 
@@ -507,7 +684,7 @@ app.post('/api/login', async (req, res) => {
       { expiresIn: '12h' }
     );
 
-    logActivity('login', user.id, username, { ip: req.ip });
+    await logActivity('login', user.id, username, { ip: req.ip });
 
     res.json({ 
       success: true, 
@@ -526,8 +703,8 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-/* ================= CREATE KEY (ENHANCED với Custom Key) ================= */
-app.post('/api/create-key', requireAuth, (req, res) => {
+/* ================= CREATE KEY (VIP can create custom keys) ================= */
+app.post('/api/create-key', requireAuth, async (req, res) => {
   try {
     const { days, devices, type, customKey } = req.body || {};
     
@@ -535,7 +712,7 @@ app.post('/api/create-key', requireAuth, (req, res) => {
       return res.status(400).json({ success: false, message: 'Vui lòng nhập đầy đủ thông tin' });
     }
 
-    const config = loadConfig();
+    const config = await loadConfig();
     const maxDays = config.settings?.max_key_days || 365;
     
     if (days > maxDays && req.user.role !== 'admin') {
@@ -545,7 +722,7 @@ app.post('/api/create-key', requireAuth, (req, res) => {
       });
     }
 
-    const users = loadUsers();
+    const users = await loadUsers();
     const user = users.find(u => u.id === req.user.userId);
 
     if (req.user.role !== 'admin') {
@@ -578,7 +755,7 @@ app.post('/api/create-key', requireAuth, (req, res) => {
     // Custom key logic
     if (customKey && customKey.trim()) {
       keyCode = customKey.trim();
-      const keys = loadKeys();
+      const keys = await loadKeys();
       if (keys.find(k => k.key_code === keyCode)) {
         return res.status(400).json({ 
           success: false, 
@@ -593,7 +770,7 @@ app.post('/api/create-key', requireAuth, (req, res) => {
     const expiresAt = new Date(Date.now() + days * 86400000).toISOString();
     const signature = signValue(keyCode);
 
-    const keys = loadKeys();
+    const keys = await loadKeys();
     const record = {
       id: uuidv4(),
       key_code: keyCode,
@@ -612,15 +789,15 @@ app.post('/api/create-key', requireAuth, (req, res) => {
     };
 
     keys.push(record);
-    saveKeys(keys);
+    await saveKeys(keys);
 
     if (req.user.role !== 'admin' && user) {
       user.keyCount++;
       user.totalKeysCreated = (user.totalKeysCreated || 0) + 1;
-      saveUsers(users);
+      await saveUsers(users);
     }
 
-    logActivity('create_key', req.user.userId, req.user.username, { 
+    await logActivity('create_key', req.user.userId, req.user.username, { 
       keyCode, 
       type, 
       days, 
@@ -635,8 +812,8 @@ app.post('/api/create-key', requireAuth, (req, res) => {
   }
 });
 
-/* ================= BULK CREATE KEYS ================= */
-app.post('/api/bulk-create-keys', requireAuth, (req, res) => {
+/* ================= BULK CREATE KEYS (ADMIN + VIP) ================= */
+app.post('/api/bulk-create-keys', requireAuth, async (req, res) => {
   try {
     const { count, days, devices, type } = req.body || {};
     
@@ -647,9 +824,10 @@ app.post('/api/bulk-create-keys', requireAuth, (req, res) => {
       });
     }
 
-    const users = loadUsers();
+    const users = await loadUsers();
     const user = users.find(u => u.id === req.user.userId);
 
+    // Allow both ADMIN and PREMIUM users
     if (req.user.role !== 'admin') {
       if (!user || !user.isPremium) {
         return res.status(403).json({ 
@@ -658,15 +836,12 @@ app.post('/api/bulk-create-keys', requireAuth, (req, res) => {
         });
       }
 
-      if (user.keyCount + count > FREE_KEY_LIMIT && !user.isPremium) {
-        return res.status(403).json({ 
-          success: false, 
-          message: 'Vượt quá giới hạn key' 
-        });
+      if (user.isBanned || !user.isActive) {
+        return res.status(403).json({ success: false, message: 'Tài khoản đã bị khóa' });
       }
     }
 
-    const keys = loadKeys();
+    const keys = await loadKeys();
     const createdKeys = [];
 
     for (let i = 0; i < count; i++) {
@@ -695,15 +870,15 @@ app.post('/api/bulk-create-keys', requireAuth, (req, res) => {
       createdKeys.push(record);
     }
 
-    saveKeys(keys);
+    await saveKeys(keys);
 
     if (req.user.role !== 'admin' && user) {
       user.keyCount += count;
       user.totalKeysCreated = (user.totalKeysCreated || 0) + count;
-      saveUsers(users);
+      await saveUsers(users);
     }
 
-    logActivity('bulk_create_keys', req.user.userId, req.user.username, { 
+    await logActivity('bulk_create_keys', req.user.userId, req.user.username, { 
       count, 
       type, 
       days, 
@@ -722,9 +897,9 @@ app.post('/api/bulk-create-keys', requireAuth, (req, res) => {
 });
 
 /* ================= LIST USER KEYS ================= */
-app.get('/api/my-keys', requireAuth, (req, res) => {
+app.get('/api/my-keys', requireAuth, async (req, res) => {
   try {
-    const keys = loadKeys();
+    const keys = await loadKeys();
     const userKeys = keys.filter(k => k.owner_id === req.user.userId);
     res.json(userKeys);
   } catch(err) {
@@ -734,9 +909,9 @@ app.get('/api/my-keys', requireAuth, (req, res) => {
 });
 
 /* ================= LIST ALL KEYS (ADMIN) ================= */
-app.get('/api/list-keys', requireAdmin, (req, res) => {
+app.get('/api/list-keys', requireAdmin, async (req, res) => {
   try {
-    res.json(loadKeys());
+    res.json(await loadKeys());
   } catch(err) {
     console.error('List all keys error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -744,16 +919,16 @@ app.get('/api/list-keys', requireAdmin, (req, res) => {
 });
 
 /* ================= USER STATS ================= */
-app.get('/api/my-stats', requireAuth, (req, res) => {
+app.get('/api/my-stats', requireAuth, async (req, res) => {
   try {
-    const users = loadUsers();
+    const users = await loadUsers();
     const user = users.find(u => u.id === req.user.userId);
     
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    const keys = loadKeys();
+    const keys = await loadKeys();
     const userKeys = keys.filter(k => k.owner_id === user.id);
     const now = new Date();
 
@@ -777,9 +952,9 @@ app.get('/api/my-stats', requireAuth, (req, res) => {
 });
 
 /* ================= GET API CODE ================= */
-app.get('/api/my-api-code', requireAuth, (req, res) => {
+app.get('/api/my-api-code', requireAuth, async (req, res) => {
   try {
-    const users = loadUsers();
+    const users = await loadUsers();
     const user = users.find(u => u.id === req.user.userId);
     
     if (!user) {
@@ -800,9 +975,9 @@ app.get('/api/my-api-code', requireAuth, (req, res) => {
 });
 
 /* ================= RESET API CODE ================= */
-app.post('/api/reset-api-code', requireAuth, (req, res) => {
+app.post('/api/reset-api-code', requireAuth, async (req, res) => {
   try {
-    const users = loadUsers();
+    const users = await loadUsers();
     const user = users.find(u => u.id === req.user.userId);
     
     if (!user) {
@@ -811,9 +986,9 @@ app.post('/api/reset-api-code', requireAuth, (req, res) => {
 
     const oldApiCode = user.apiCode;
     user.apiCode = generateAPICode();
-    saveUsers(users);
+    await saveUsers(users);
 
-    logActivity('reset_api_code', user.id, user.username, { 
+    await logActivity('reset_api_code', user.id, user.username, { 
       oldCode: oldApiCode.substring(0, 15) + '...' 
     });
 
@@ -829,10 +1004,10 @@ app.post('/api/reset-api-code', requireAuth, (req, res) => {
 });
 
 /* ================= EXTEND KEY ================= */
-app.post('/api/extend-key', requireAuth, (req, res) => {
+app.post('/api/extend-key', requireAuth, async (req, res) => {
   try {
     const { key, days } = req.body || {};
-    const keys = loadKeys();
+    const keys = await loadKeys();
     const found = keys.find(k => k.key_code === key);
     
     if (!found) {
@@ -847,9 +1022,9 @@ app.post('/api/extend-key', requireAuth, (req, res) => {
       new Date(found.expires_at).getTime() + days * 86400000
     ).toISOString();
 
-    saveKeys(keys);
+    await saveKeys(keys);
 
-    logActivity('extend_key', req.user.userId, req.user.username, { keyCode: key, days });
+    await logActivity('extend_key', req.user.userId, req.user.username, { keyCode: key, days });
 
     res.json({ success: true, message: 'Gia hạn key thành công' });
   } catch(err) {
@@ -859,10 +1034,10 @@ app.post('/api/extend-key', requireAuth, (req, res) => {
 });
 
 /* ================= RESET KEY ================= */
-app.post('/api/reset-key', requireAuth, (req, res) => {
+app.post('/api/reset-key', requireAuth, async (req, res) => {
   try {
     const { key } = req.body || {};
-    const keys = loadKeys();
+    const keys = await loadKeys();
     const found = keys.find(k => k.key_code === key);
     
     if (!found) {
@@ -875,9 +1050,9 @@ app.post('/api/reset-key', requireAuth, (req, res) => {
 
     const oldDevices = found.devices.length;
     found.devices = [];
-    saveKeys(keys);
+    await saveKeys(keys);
 
-    logActivity('reset_key', req.user.userId, req.user.username, { 
+    await logActivity('reset_key', req.user.userId, req.user.username, { 
       keyCode: key, 
       devicesCleared: oldDevices 
     });
@@ -890,10 +1065,10 @@ app.post('/api/reset-key', requireAuth, (req, res) => {
 });
 
 /* ================= DELETE KEY ================= */
-app.post('/api/delete-key', requireAuth, (req, res) => {
+app.post('/api/delete-key', requireAuth, async (req, res) => {
   try {
     const { key } = req.body || {};
-    let keys = loadKeys();
+    let keys = await loadKeys();
     const found = keys.find(k => k.key_code === key);
     
     if (!found) {
@@ -905,18 +1080,18 @@ app.post('/api/delete-key', requireAuth, (req, res) => {
     }
 
     keys = keys.filter(k => k.key_code !== key);
-    saveKeys(keys);
+    await saveKeys(keys);
 
     if (found.owner_id && found.owner_id !== 'admin') {
-      const users = loadUsers();
+      const users = await loadUsers();
       const user = users.find(u => u.id === found.owner_id);
       if (user && user.keyCount > 0) {
         user.keyCount--;
-        saveUsers(users);
+        await saveUsers(users);
       }
     }
 
-    logActivity('delete_key', req.user.userId, req.user.username, { keyCode: key });
+    await logActivity('delete_key', req.user.userId, req.user.username, { keyCode: key });
 
     res.json({ success: true, message: 'Xóa key thành công' });
   } catch(err) {
@@ -925,8 +1100,8 @@ app.post('/api/delete-key', requireAuth, (req, res) => {
   }
 });
 
-/* ================= VERIFY KEY (PUBLIC - ENHANCED) ================= */
-app.post('/api/verify-key', (req, res) => {
+/* ================= VERIFY KEY (PUBLIC) ================= */
+app.post('/api/verify-key', async (req, res) => {
   try {
     const { key, device_id, api_code } = req.body || {};
     
@@ -938,7 +1113,7 @@ app.post('/api/verify-key', (req, res) => {
       });
     }
 
-    const keys = loadKeys();
+    const keys = await loadKeys();
     const found = keys.find(k => k.key_code === key);
     
     if (!found) {
@@ -960,7 +1135,7 @@ app.post('/api/verify-key', (req, res) => {
         });
       }
 
-      const users = loadUsers();
+      const users = await loadUsers();
       const keyOwner = users.find(u => u.id === found.owner_id);
       
       if (!keyOwner) {
@@ -989,7 +1164,7 @@ app.post('/api/verify-key', (req, res) => {
 
       // Update user verification count
       keyOwner.totalVerifications = (keyOwner.totalVerifications || 0) + 1;
-      saveUsers(users);
+      await saveUsers(users);
     }
 
     // Verify signature
@@ -1030,7 +1205,7 @@ app.post('/api/verify-key', (req, res) => {
     // Update verification stats
     found.total_verifications = (found.total_verifications || 0) + 1;
     found.last_verified = new Date().toISOString();
-    saveKeys(keys);
+    await saveKeys(keys);
 
     res.json({ 
       success: true, 
@@ -1051,7 +1226,7 @@ app.post('/api/verify-key', (req, res) => {
 });
 
 /* ================= KEY INFO ================= */
-app.post('/api/key-info', (req, res) => {
+app.post('/api/key-info', async (req, res) => {
   try {
     const { key } = req.body || {};
     
@@ -1059,7 +1234,7 @@ app.post('/api/key-info', (req, res) => {
       return res.status(400).json({ success: false, message: 'Thiếu key' });
     }
 
-    const keys = loadKeys();
+    const keys = await loadKeys();
     const found = keys.find(k => k.key_code === key);
     
     if (!found) {
@@ -1094,9 +1269,10 @@ app.post('/api/key-info', (req, res) => {
 });
 
 /* ================= ADMIN: USER MANAGEMENT ================= */
-app.get('/api/admin/users', requireAdmin, (req, res) => {
+app.get('/api/admin/users', requireAdmin, async (req, res) => {
   try {
-    const users = loadUsers().map(u => ({
+    const users = await loadUsers();
+    const sanitizedUsers = users.map(u => ({
       id: u.id,
       username: u.username,
       email: u.email,
@@ -1112,18 +1288,18 @@ app.get('/api/admin/users', requireAdmin, (req, res) => {
       totalKeysCreated: u.totalKeysCreated || 0,
       totalVerifications: u.totalVerifications || 0
     }));
-    res.json(users);
+    res.json(sanitizedUsers);
   } catch(err) {
     console.error('List users error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
-app.post('/api/admin/grant-premium', requireAdmin, (req, res) => {
+app.post('/api/admin/grant-premium', requireAdmin, async (req, res) => {
   try {
     const { userId } = req.body || {};
     
-    const users = loadUsers();
+    const users = await loadUsers();
     const user = users.find(u => u.id === userId);
     
     if (!user) {
@@ -1131,17 +1307,17 @@ app.post('/api/admin/grant-premium', requireAdmin, (req, res) => {
     }
 
     user.isPremium = true;
-    saveUsers(users);
+    await saveUsers(users);
 
-    const keys = loadKeys();
+    const keys = await loadKeys();
     keys.forEach(k => {
       if (k.owner_id === userId) {
         k.require_api_key = false;
       }
     });
-    saveKeys(keys);
+    await saveKeys(keys);
 
-    logActivity('grant_premium', 'admin', 'admin', { targetUser: user.username });
+    await logActivity('grant_premium', 'admin', 'admin', { targetUser: user.username });
     
     res.json({ success: true, message: 'Đã cấp Premium' });
   } catch(err) {
@@ -1150,11 +1326,11 @@ app.post('/api/admin/grant-premium', requireAdmin, (req, res) => {
   }
 });
 
-app.post('/api/admin/revoke-premium', requireAdmin, (req, res) => {
+app.post('/api/admin/revoke-premium', requireAdmin, async (req, res) => {
   try {
     const { userId } = req.body || {};
     
-    const users = loadUsers();
+    const users = await loadUsers();
     const user = users.find(u => u.id === userId);
     
     if (!user) {
@@ -1162,17 +1338,17 @@ app.post('/api/admin/revoke-premium', requireAdmin, (req, res) => {
     }
 
     user.isPremium = false;
-    saveUsers(users);
+    await saveUsers(users);
 
-    const keys = loadKeys();
+    const keys = await loadKeys();
     keys.forEach(k => {
       if (k.owner_id === userId) {
         k.require_api_key = true;
       }
     });
-    saveKeys(keys);
+    await saveKeys(keys);
 
-    logActivity('revoke_premium', 'admin', 'admin', { targetUser: user.username });
+    await logActivity('revoke_premium', 'admin', 'admin', { targetUser: user.username });
     
     res.json({ success: true, message: 'Đã thu hồi Premium' });
   } catch(err) {
@@ -1181,11 +1357,11 @@ app.post('/api/admin/revoke-premium', requireAdmin, (req, res) => {
   }
 });
 
-app.post('/api/admin/ban-user', requireAdmin, (req, res) => {
+app.post('/api/admin/ban-user', requireAdmin, async (req, res) => {
   try {
     const { userId } = req.body || {};
     
-    const users = loadUsers();
+    const users = await loadUsers();
     const user = users.find(u => u.id === userId);
     
     if (!user) {
@@ -1193,9 +1369,9 @@ app.post('/api/admin/ban-user', requireAdmin, (req, res) => {
     }
 
     user.isBanned = true;
-    saveUsers(users);
+    await saveUsers(users);
 
-    logActivity('ban_user', 'admin', 'admin', { targetUser: user.username });
+    await logActivity('ban_user', 'admin', 'admin', { targetUser: user.username });
     
     res.json({ success: true, message: 'Đã ban user' });
   } catch(err) {
@@ -1204,11 +1380,11 @@ app.post('/api/admin/ban-user', requireAdmin, (req, res) => {
   }
 });
 
-app.post('/api/admin/unban-user', requireAdmin, (req, res) => {
+app.post('/api/admin/unban-user', requireAdmin, async (req, res) => {
   try {
     const { userId } = req.body || {};
     
-    const users = loadUsers();
+    const users = await loadUsers();
     const user = users.find(u => u.id === userId);
     
     if (!user) {
@@ -1216,9 +1392,9 @@ app.post('/api/admin/unban-user', requireAdmin, (req, res) => {
     }
 
     user.isBanned = false;
-    saveUsers(users);
+    await saveUsers(users);
 
-    logActivity('unban_user', 'admin', 'admin', { targetUser: user.username });
+    await logActivity('unban_user', 'admin', 'admin', { targetUser: user.username });
     
     res.json({ success: true, message: 'Đã unban user' });
   } catch(err) {
@@ -1227,11 +1403,11 @@ app.post('/api/admin/unban-user', requireAdmin, (req, res) => {
   }
 });
 
-app.post('/api/admin/toggle-active', requireAdmin, (req, res) => {
+app.post('/api/admin/toggle-active', requireAdmin, async (req, res) => {
   try {
     const { userId } = req.body || {};
     
-    const users = loadUsers();
+    const users = await loadUsers();
     const user = users.find(u => u.id === userId);
     
     if (!user) {
@@ -1239,9 +1415,9 @@ app.post('/api/admin/toggle-active', requireAdmin, (req, res) => {
     }
 
     user.isActive = !user.isActive;
-    saveUsers(users);
+    await saveUsers(users);
 
-    logActivity('toggle_active', 'admin', 'admin', { 
+    await logActivity('toggle_active', 'admin', 'admin', { 
       targetUser: user.username, 
       newStatus: user.isActive 
     });
@@ -1253,25 +1429,25 @@ app.post('/api/admin/toggle-active', requireAdmin, (req, res) => {
   }
 });
 
-app.post('/api/admin/delete-user', requireAdmin, (req, res) => {
+app.post('/api/admin/delete-user', requireAdmin, async (req, res) => {
   try {
     const { userId } = req.body || {};
     
-    let users = loadUsers();
+    let users = await loadUsers();
     const user = users.find(u => u.id === userId);
     
     if (!user) {
       return res.status(404).json({ success: false, message: 'Không tìm thấy user' });
     }
 
-    let keys = loadKeys();
+    let keys = await loadKeys();
     keys = keys.filter(k => k.owner_id !== userId);
-    saveKeys(keys);
+    await saveKeys(keys);
 
     users = users.filter(u => u.id !== userId);
-    saveUsers(users);
+    await saveUsers(users);
 
-    logActivity('delete_user', 'admin', 'admin', { targetUser: user.username });
+    await logActivity('delete_user', 'admin', 'admin', { targetUser: user.username });
     
     res.json({ success: true, message: 'Đã xóa user và tất cả key của họ' });
   } catch(err) {
@@ -1281,9 +1457,9 @@ app.post('/api/admin/delete-user', requireAdmin, (req, res) => {
 });
 
 /* ================= ADMIN: SETTINGS ================= */
-app.get('/api/admin/settings', requireAdmin, (req, res) => {
+app.get('/api/admin/settings', requireAdmin, async (req, res) => {
   try {
-    const config = loadConfig();
+    const config = await loadConfig();
     res.json(config.settings || {});
   } catch(err) {
     console.error('Get settings error:', err);
@@ -1291,13 +1467,13 @@ app.get('/api/admin/settings', requireAdmin, (req, res) => {
   }
 });
 
-app.post('/api/admin/settings', requireAdmin, (req, res) => {
+app.post('/api/admin/settings', requireAdmin, async (req, res) => {
   try {
-    const config = loadConfig();
+    const config = await loadConfig();
     config.settings = { ...config.settings, ...req.body };
-    saveConfig(config);
+    await saveConfig(config);
 
-    logActivity('update_settings', 'admin', 'admin', req.body);
+    await logActivity('update_settings', 'admin', 'admin', req.body);
 
     res.json({ success: true, message: 'Cập nhật settings thành công' });
   } catch(err) {
@@ -1307,9 +1483,9 @@ app.post('/api/admin/settings', requireAdmin, (req, res) => {
 });
 
 /* ================= ADMIN: LOGS ================= */
-app.get('/api/admin/logs', requireAdmin, (req, res) => {
+app.get('/api/admin/logs', requireAdmin, async (req, res) => {
   try {
-    const logs = loadLogs();
+    const logs = await loadLogs();
     const limit = parseInt(req.query.limit) || 100;
     res.json(logs.slice(-limit).reverse());
   } catch(err) {
@@ -1319,9 +1495,9 @@ app.get('/api/admin/logs', requireAdmin, (req, res) => {
 });
 
 /* ================= ADMIN: BACKUP ================= */
-app.post('/api/admin/backup', requireAdmin, (req, res) => {
+app.post('/api/admin/backup', requireAdmin, async (req, res) => {
   try {
-    createBackup();
+    await createBackup();
     res.json({ success: true, message: 'Backup thành công' });
   } catch(err) {
     console.error('Backup error:', err);
@@ -1329,18 +1505,21 @@ app.post('/api/admin/backup', requireAdmin, (req, res) => {
   }
 });
 
-app.get('/api/admin/backups', requireAdmin, (req, res) => {
+app.get('/api/admin/backups', requireAdmin, async (req, res) => {
   try {
-    const backups = fs.readdirSync(BACKUP_DIR).map(name => {
-      const backupPath = path.join(BACKUP_DIR, name);
-      const stats = fs.statSync(backupPath);
-      return {
-        name,
-        created: stats.mtime,
-        size: stats.size
-      };
-    });
-    res.json(backups);
+    const backups = await fs.readdir(BACKUP_DIR);
+    const backupDetails = await Promise.all(
+      backups.map(async (name) => {
+        const backupPath = path.join(BACKUP_DIR, name);
+        const stats = await fs.stat(backupPath);
+        return {
+          name,
+          created: stats.mtime,
+          size: stats.size
+        };
+      })
+    );
+    res.json(backupDetails);
   } catch(err) {
     console.error('List backups error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -1348,11 +1527,11 @@ app.get('/api/admin/backups', requireAdmin, (req, res) => {
 });
 
 /* ================= ADMIN: STATS ================= */
-app.get('/api/admin/stats', requireAdmin, (req, res) => {
+app.get('/api/admin/stats', requireAdmin, async (req, res) => {
   try {
-    const users = loadUsers();
-    const keys = loadKeys();
-    const devices = loadDevices();
+    const users = await loadUsers();
+    const keys = await loadKeys();
+    const devices = await loadDevices();
     const now = new Date();
 
     const stats = {
@@ -1376,9 +1555,9 @@ app.get('/api/admin/stats', requireAdmin, (req, res) => {
 });
 
 /* ================= CONTACT INFO ================= */
-app.get('/api/contact', (req, res) => {
+app.get('/api/contact', async (req, res) => {
   try {
-    const cfg = loadConfig();
+    const cfg = await loadConfig();
     res.json(cfg.contact || {});
   } catch(err) {
     console.error('Get contact error:', err);
@@ -1391,11 +1570,11 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.get('/api', (req, res) => {
-  const config = loadConfig();
+app.get('/api', async (req, res) => {
+  const config = await loadConfig();
   res.json({
-    name: "AuthAPI v3.3 ULTIMATE - No Email Validation",
-    version: "3.3.0",
+    name: "AuthAPI v3.4 ULTIMATE - Anti-Crash Edition",
+    version: "3.4.0",
     status: "online",
     maintenance_mode: config.settings?.maintenance_mode || false,
     features: [
@@ -1406,13 +1585,17 @@ app.get('/api', (req, res) => {
       "🔒 Mandatory API Code for FREE users",
       "⭐ Premium users bypass API Code",
       "💎 Custom key creation (Premium only)",
-      "📦 Bulk key creation (Premium only)",
+      "📦 Bulk key creation (Admin + Premium)",
       "💾 Auto backup every 6 hours",
       "📊 Activity logging system",
       "🔄 API Code reset",
       "🔐 HMAC signature verification",
       "📱 Device tracking (by UserAgent + IP)",
       "🛡️ Anti-crash error handling",
+      "🔒 File locking system",
+      "⚡ Retry mechanism with exponential backoff",
+      "💾 Memory monitoring & GC",
+      "⏱️ Request timeout protection",
       "⚙️ System settings management",
       "🔧 Maintenance mode support"
     ],
@@ -1420,18 +1603,29 @@ app.get('/api', (req, res) => {
       email_verification: "DISABLED - Accept any email, allow duplicates",
       device_limit: "3 accounts per device (UserAgent + IP hash)",
       free_users: "MUST provide api_code when verifying keys",
-      premium_users: "Can verify without api_code",
+      premium_users: "Can verify without api_code + bulk create keys",
       admin_keys: "Never require api_code"
+    },
+    key_prefixes: {
+      standard: "KEY-XXXXXX-XXXX",
+      vip: "VIP-XXXXXX-XXXX",
+      custom: "Premium users can create custom keys"
     }
   });
 });
 
 /* ================= HEALTH CHECK ================= */
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
+  const used = process.memoryUsage();
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    uptime: process.uptime()
+    uptime: process.uptime(),
+    memory: {
+      heapUsed: Math.round(used.heapUsed / 1024 / 1024) + 'MB',
+      heapTotal: Math.round(used.heapTotal / 1024 / 1024) + 'MB',
+      rss: Math.round(used.rss / 1024 / 1024) + 'MB'
+    }
   });
 });
 
@@ -1445,41 +1639,58 @@ app.use((req, res) => {
 });
 
 /* ================= SERVER START ================= */
-const server = app.listen(PORT, () => {
-  console.log('╔═══════════════════════════════════════════════════╗');
-  console.log('║   AuthAPI v3.3 ULTIMATE - Multi Email Support    ║');
-  console.log('╚═══════════════════════════════════════════════════╝');
-  console.log(`✅ Server: http://localhost:${PORT}`);
-  console.log('📧 Same email: Multiple accounts allowed');
-  console.log('🔒 Device limit: Max 3 accounts per device');
-  console.log('🔑 Free: 10 keys | Premium: Unlimited');
-  console.log('💎 Custom keys: Premium only');
-  console.log('📦 Bulk create: Premium only (1-100 keys)');
-  console.log('💾 Auto backup: Every 6 hours');
-  console.log('📊 Activity logs: Last 1000 actions');
-  console.log('🔒 API Code required for FREE users');
-  console.log('⭐ Premium users: No API Code needed');
-  console.log('═══════════════════════════════════════════════════');
-  
-  // Create initial backup
-  createBackup();
-});
+async function startServer() {
+  try {
+    await initializeFiles();
+    await ensureBackupDir();
+    
+    const server = app.listen(PORT, () => {
+      console.log('╔═══════════════════════════════════════════════════╗');
+      console.log('║   AuthAPI v3.4 ULTIMATE - Anti-Crash Edition     ║');
+      console.log('╚═══════════════════════════════════════════════════╝');
+      console.log(`✅ Server: http://localhost:${PORT}`);
+      console.log('📧 Same email: Multiple accounts allowed');
+      console.log('🔒 Device limit: Max 3 accounts per device');
+      console.log('🔑 Free: 10 keys | Premium: Unlimited');
+      console.log('💎 Custom keys: Premium only');
+      console.log('📦 Bulk create: Admin + Premium (1-100 keys)');
+      console.log('💾 Auto backup: Every 6 hours');
+      console.log('📊 Activity logs: Last 1000 actions');
+      console.log('🔒 API Code required for FREE users');
+      console.log('⭐ Premium users: No API Code needed + Bulk create');
+      console.log('🛡️ Anti-crash: File locking + Retry + Memory monitor');
+      console.log('🔑 Key types: KEY-*, VIP-* (old ZXS->KEY, BRUTAL->VIP)');
+      console.log('═══════════════════════════════════════════════════');
+      
+      // Create initial backup
+      createBackup().catch(err => console.error('Initial backup failed:', err));
+    });
 
-/* ================= GRACEFUL SHUTDOWN ================= */
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received...');
-  createBackup();
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
-  });
-});
+    /* ================= GRACEFUL SHUTDOWN ================= */
+    const gracefulShutdown = async (signal) => {
+      console.log(`\n${signal} received...`);
+      console.log('Creating final backup...');
+      await createBackup();
+      
+      server.close(() => {
+        console.log('Server closed gracefully');
+        process.exit(0);
+      });
 
-process.on('SIGINT', () => {
-  console.log('SIGINT received...');
-  createBackup();
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
-  });
-});
+      // Force close after 10 seconds
+      setTimeout(() => {
+        console.error('Forced shutdown after timeout');
+        process.exit(1);
+      }, 10000);
+    };
+
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+  } catch (err) {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  }
+}
+
+startServer();
